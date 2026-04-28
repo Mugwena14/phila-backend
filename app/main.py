@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.api.routes import auth, doctors
+from app.api.routes import auth, doctors, bookings
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -21,6 +21,7 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(doctors.router, prefix="/api/v1")
+app.include_router(bookings.router, prefix="/api/v1")
 
 @app.get("/")
 def root():
