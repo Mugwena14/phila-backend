@@ -29,6 +29,8 @@ class Doctor(Base):
     slot_duration_minutes = Column(Integer, default=20)
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
+    rating = Column(Float, default=0.0)
+    total_reviews = Column(Integer, default=0)
 
     # Medical aids accepted — stored as array of strings
     medical_aids = Column(ARRAY(String), default=[])

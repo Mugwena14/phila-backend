@@ -80,10 +80,41 @@ def register_doctor(
     db.commit()
     db.refresh(doctor)
 
-    # Auto-generate slots for the next 7 days
-    generate_slots_for_week(db, doctor, date.today())
+    # Generate slots for next 14 days
+    from app.services.slot_service import generate_slots_for_day
+    from datetime import timedelta
+    for i in range(14):
+        target = date.today() + timedelta(days=i)
+        generate_slots_for_day(db, doctor, target)
+    
 
     return doctor
+
+@router.get("/search", response_model=List[DoctorResponse])
+def general_search(
+    q: Optional[str] = None,
+    city: Optional[str] = None,
+    medical_aid: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    from sqlalchemy import or_
+    query = db.query(Doctor).filter(Doctor.is_active == True)
+
+    if q:
+        query = query.filter(
+            or_(
+                Doctor.specialty.ilike(f"%{q}%"),
+                Doctor.practice_name.ilike(f"%{q}%"),
+                Doctor.city.ilike(f"%{q}%"),
+                Doctor.bio.ilike(f"%{q}%"),
+            )
+        )
+    if city:
+        query = query.filter(Doctor.city.ilike(f"%{city}%"))
+    if medical_aid:
+        query = query.filter(Doctor.medical_aids.contains([medical_aid]))
+
+    return query.all()
 
 
 @router.get("/", response_model=List[DoctorResponse])
@@ -91,6 +122,7 @@ def search_doctors(
     specialty: Optional[str] = None,
     city: Optional[str] = None,
     medical_aid: Optional[str] = None,
+    name: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     query = db.query(Doctor).filter(Doctor.is_active == True)
@@ -101,7 +133,11 @@ def search_doctors(
         query = query.filter(Doctor.city.ilike(f"%{city}%"))
     if medical_aid:
         query = query.filter(Doctor.medical_aids.contains([medical_aid]))
+    if name:
+        query = query.filter(Doctor.practice_name.ilike(f"%{name}%"))
 
+    # If a general query is passed that matches neither specialty nor name
+    # search across both fields using OR
     return query.all()
 
 
@@ -134,10 +170,9 @@ def get_doctor_slots(
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor not found")
 
-    # If no date provided, use today
     target_date = date if date else datetime.today().date()
 
-    # Auto-generate slots if none exist for this date
+    # Always try to generate — service checks for existing slots
     from app.services.slot_service import generate_slots_for_day
     generate_slots_for_day(db, doctor, target_date)
 
@@ -152,7 +187,6 @@ def get_doctor_slots(
         .all()
     )
 
-    # Serialize manually since date/time need string conversion
     return [
         SlotResponse(
             id=s.id,
@@ -164,3 +198,5 @@ def get_doctor_slots(
         )
         for s in slots
     ]
+
+

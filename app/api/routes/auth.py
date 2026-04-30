@@ -6,6 +6,9 @@ from app.models.user import User
 from app.schemas.user import UserCreate, UserResponse, Token
 from app.core.security import hash_password, verify_password, create_access_token
 
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from app.core.security import decode_token
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/register", response_model=UserResponse, status_code=201)
@@ -35,3 +38,24 @@ def login(email: str, password: str, db: Session = Depends(get_db)):
 
     token = create_access_token({"sub": str(user.id), "role": user.role})
     return {"access_token": token, "token_type": "bearer"}
+
+
+
+security_scheme = HTTPBearer()
+
+def get_current_user_auth(
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    token = credentials.credentials
+    payload = decode_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = db.query(User).filter(User.id == payload.get("sub")).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+@router.get("/me", response_model=UserResponse)
+def get_me(current_user: User = Depends(get_current_user_auth)):
+    return current_user

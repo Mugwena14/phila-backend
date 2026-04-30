@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 from typing import List
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from uuid import UUID
 
 from app.db.database import get_db
@@ -19,11 +18,15 @@ from app.schemas.booking import (
     WaitlistResponse,
 )
 from app.services.risk_service import calculate_risk_score
+from app.services.whatsapp import send_whatsapp_message
+from app.tasks.whatsapp_tasks import send_intake_whatsapp, send_appointment_reminder
 from app.core.security import decode_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import logging
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 security = HTTPBearer()
+logger = logging.getLogger(__name__)
 
 
 def get_current_user(
@@ -93,6 +96,60 @@ def create_booking(
     db.commit()
     db.refresh(booking)
 
+    # ── WEEK 4 AGENT TASKS ──────────────────────────────────────────
+
+    booking_id = str(booking.id)
+
+    # 1. Intake agent — fires 60 seconds after booking
+    send_intake_whatsapp.apply_async(
+        args=[booking_id],
+        countdown=10,
+    )
+    logger.info(f"Intake task queued for booking {booking_id}")
+
+    # 2. No-show prevention — reminder ladder based on risk score
+    appt_datetime = datetime.combine(slot.date, slot.start_time)
+
+    # 24hr reminder — every patient gets this
+    remind_24hr = appt_datetime - timedelta(hours=24)
+    if remind_24hr > datetime.now():
+        send_appointment_reminder.apply_async(
+            args=[booking_id, 24],
+            eta=remind_24hr,
+        )
+        logger.info(f"24hr reminder queued for booking {booking_id}")
+
+    # 2hr reminder — every patient gets this
+    remind_2hr = appt_datetime - timedelta(hours=2)
+    if remind_2hr > datetime.now():
+        send_appointment_reminder.apply_async(
+            args=[booking_id, 2],
+            eta=remind_2hr,
+        )
+        logger.info(f"2hr reminder queued for booking {booking_id}")
+
+    # 48hr reminder — medium and high risk only (score >= 30)
+    if risk >= 30:
+        remind_48hr = appt_datetime - timedelta(hours=48)
+        if remind_48hr > datetime.now():
+            send_appointment_reminder.apply_async(
+                args=[booking_id, 48],
+                eta=remind_48hr,
+            )
+            logger.info(f"48hr reminder queued for booking {booking_id} (risk: {risk})")
+
+    # 72hr reminder — high risk only (score >= 65)
+    if risk >= 65:
+        remind_72hr = appt_datetime - timedelta(hours=72)
+        if remind_72hr > datetime.now():
+            send_appointment_reminder.apply_async(
+                args=[booking_id, 72],
+                eta=remind_72hr,
+            )
+            logger.info(f"72hr reminder queued for booking {booking_id} (risk: {risk})")
+
+    # ────────────────────────────────────────────────────────────────
+
     return booking
 
 
@@ -137,7 +194,6 @@ def get_practice_bookings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Get the doctor profile for this user
     doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor profile not found")
@@ -193,17 +249,15 @@ def cancel_booking(
     if booking.status != "confirmed":
         raise HTTPException(status_code=400, detail="Booking already cancelled or completed")
 
-    # Cancel the booking
     booking.status = "cancelled"
 
-    # Release the slot back to available
     slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
     if slot:
         slot.status = "available"
 
     db.commit()
 
-    # Check waitlist — notify first person waiting
+    # Notify first person on waitlist + send them a WhatsApp
     waiting = (
         db.query(Waitlist)
         .filter(
@@ -218,7 +272,21 @@ def cancel_booking(
     if waiting:
         waiting.status = "notified"
         db.commit()
-        # In Week 4 we fire a WhatsApp message here
+
+        # Week 4 — fire WhatsApp to waitlist patient
+        waiting_user = db.query(User).filter(
+            User.id == waiting.patient_id
+        ).first()
+        if waiting_user and slot:
+            send_whatsapp_message(
+                waiting_user.phone,
+                f"Good news! A slot just opened up on {slot.date}. "
+                f"Open Phila to book it before it's gone! 🎉"
+            )
+            logger.info(
+                f"Waitlist notification sent to {waiting_user.phone} "
+                f"for slot on {slot.date}"
+            )
 
     return {"message": "Booking cancelled successfully", "slot_released": True}
 
@@ -229,7 +297,6 @@ def join_waitlist(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Check not already on waitlist
     existing = (
         db.query(Waitlist)
         .filter(
@@ -241,7 +308,10 @@ def join_waitlist(
         .first()
     )
     if existing:
-        raise HTTPException(status_code=400, detail="Already on waitlist for this date")
+        raise HTTPException(
+            status_code=400,
+            detail="Already on waitlist for this date"
+        )
 
     entry = Waitlist(
         patient_id=current_user.id,
