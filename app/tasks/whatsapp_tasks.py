@@ -13,28 +13,25 @@ logger = logging.getLogger(__name__)
 @celery_app.task(bind=True, max_retries=3)
 def send_intake_whatsapp(self, booking_id: str):
     """
-    Fires 60 seconds after booking confirmed.
-    Sends the first intake message to the patient via WhatsApp.
+    Fires 10 seconds after booking confirmed.
+    Sends first intake question + initialises conversation state.
     """
     db = SessionLocal()
     try:
-        # Fetch booking with related data
         booking = db.query(Booking).filter(
             Booking.id == booking_id
         ).first()
 
         if not booking:
-            logger.error(f"Booking {booking_id} not found for intake task")
+            logger.error(f"Booking {booking_id} not found")
             return
 
         patient = db.query(User).filter(
             User.id == booking.patient_id
         ).first()
-
         slot = db.query(Slot).filter(
             Slot.id == booking.slot_id
         ).first()
-
         doctor = db.query(Doctor).filter(
             Doctor.id == booking.doctor_id
         ).first()
@@ -43,37 +40,44 @@ def send_intake_whatsapp(self, booking_id: str):
             logger.error(f"Missing data for booking {booking_id}")
             return
 
-        # Format appointment time nicely
         appt_date = slot.date.strftime("%A, %d %B")
         appt_time = slot.start_time.strftime("%H:%M")
 
-        # First intake message
+        # Initialise conversation state in Redis
+        from app.services.intake_agent import start_intake
+        start_intake(
+            phone=patient.phone,
+            booking_id=booking_id,
+            patient_name=patient.full_name,
+            doctor_name=doctor.practice_name,
+            appt_date=appt_date,
+            appt_time=appt_time,
+        )
+
+        # Send the first intake message
         message = (
             f"Hi {patient.full_name.split()[0]}! 👋\n\n"
-            f"You're booked with {doctor.practice_name} on "
-            f"{appt_date} at {appt_time}.\n\n"
-            f"To help your doctor prepare, can I ask you 5 quick questions "
+            f"You're booked with *{doctor.practice_name}* on "
+            f"*{appt_date} at {appt_time}*.\n\n"
+            f"To help your doctor prepare, I have a few quick questions "
             f"about your visit.\n\n"
             f"*What is your main concern for this appointment?*\n\n"
-            f"_(Reply in English, Zulu, Xhosa or Afrikaans — your choice)_"
+            f"_(Reply in English, Zulu, Xhosa or Afrikaans)_"
         )
 
         success = send_whatsapp_message(patient.phone, message)
 
-        if success:
-            logger.info(
-                f"Intake message sent for booking {booking_id} "
-                f"to {patient.phone}"
-            )
-        else:
-            # Retry if sending failed
+        if not success:
             raise self.retry(countdown=120)
 
+        logger.info(f"Intake started for booking {booking_id}")
+
     except Exception as e:
-        logger.error(f"Error in send_intake_whatsapp task: {e}")
+        logger.error(f"Error in send_intake_whatsapp: {e}")
         raise self.retry(exc=e, countdown=120)
     finally:
         db.close()
+
 
 
 @celery_app.task(bind=True, max_retries=3)
@@ -138,6 +142,68 @@ def send_appointment_reminder(self, booking_id: str, hours_before: int):
 
     except Exception as e:
         logger.error(f"Error sending reminder for booking {booking_id}: {e}")
+        raise self.retry(exc=e, countdown=300)
+    finally:
+        db.close()
+
+
+
+@celery_app.task(bind=True, max_retries=3)
+def send_followup_whatsapp(self, booking_id: str):
+    """
+    Fires 3 days after appointment.
+    Checks in with patient on how they're feeling.
+    """
+    db = SessionLocal()
+    try:
+        booking = db.query(Booking).filter(
+            Booking.id == booking_id
+        ).first()
+
+        if not booking:
+            return
+
+        patient = db.query(User).filter(
+            User.id == booking.patient_id
+        ).first()
+        doctor = db.query(Doctor).filter(
+            Doctor.id == booking.doctor_id
+        ).first()
+
+        if not all([patient, doctor]):
+            return
+
+        # Store follow-up state in Redis so we can process reply
+        import redis
+        import json
+        from app.core.config import settings as app_settings
+        r = redis.from_url(app_settings.REDIS_URL, decode_responses=True)
+        r.setex(
+            f"followup:{patient.phone}",
+            86400,  # 24hr window to reply
+            json.dumps({
+                "booking_id": booking_id,
+                "patient_name": patient.full_name,
+                "doctor_name": doctor.practice_name,
+            })
+        )
+
+        first_name = patient.full_name.split()[0]
+        message = (
+            f"Hi {first_name}! 👋\n\n"
+            f"It's been a few days since your visit with "
+            f"*{doctor.practice_name}*.\n\n"
+            f"How are you feeling? Is your main concern improving? 💙"
+        )
+
+        success = send_whatsapp_message(patient.phone, message)
+        if not success:
+            raise self.retry(countdown=300)
+
+        logger.info(f"Follow-up sent for booking {booking_id}")
+
+    except Exception as e:
+        logger.error(f"Error in follow-up task: {e}")
         raise self.retry(exc=e, countdown=300)
     finally:
         db.close()

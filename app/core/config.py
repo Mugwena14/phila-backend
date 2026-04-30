@@ -9,10 +9,11 @@ class Settings(BaseSettings):
     APP_NAME: str = "Phila"
     DEBUG: bool = True
 
-    # Twilio
     TWILIO_ACCOUNT_SID: str
     TWILIO_AUTH_TOKEN: str
     TWILIO_WHATSAPP_FROM: str = "whatsapp:+14155238886"
+
+    ANTHROPIC_API_KEY: str
 
     class Config:
         env_file = ".env"

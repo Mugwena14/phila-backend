@@ -6,3 +6,4 @@ from app.models.working_hours import WorkingHours
 from app.models.booking import Booking
 from app.models.waitlist import Waitlist
 from app.models.patient_profile import PatientProfile
+from app.models.intake_brief import IntakeBrief

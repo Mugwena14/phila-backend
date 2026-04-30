@@ -9,11 +9,9 @@ logger = logging.getLogger(__name__)
 @router.post("/whatsapp")
 async def whatsapp_webhook(request: Request):
     """
-    Twilio sends ALL incoming WhatsApp replies here.
-    This is the central router — it decides what to do
-    based on the message content and sender.
+    Central entry point for all incoming WhatsApp messages.
+    Intake conversations take priority over YES/NO routing.
     """
-    # Twilio sends form-encoded data — parse it
     form_data = await request.form()
     data = parse_incoming_message(dict(form_data))
 
@@ -23,8 +21,22 @@ async def whatsapp_webhook(request: Request):
 
     logger.info(f"Incoming WhatsApp from {from_number}: {original_body}")
 
-    # Route based on message content
-    # Week 4 — we handle YES/NO for no-show prevention
+    # ── CHECK INTAKE STATE FIRST ─────────────────────────────────────
+    # If patient is mid-intake, ALL messages go to Claude
+    # regardless of content — even "yes", "no", "cancel"
+    from app.services.conversation_state import get_conversation
+    state = get_conversation(from_number)
+
+    if state["stage"] == "in_progress":
+        await handle_intake_reply(from_number, original_body)
+        return Response(
+            content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            media_type="application/xml",
+            status_code=200,
+        )
+    # ─────────────────────────────────────────────────────────────────
+
+    # Only reach YES/NO handler if NO active intake conversation
     if body in ["yes", "y", "confirm", "yes ✓"]:
         await handle_confirmation(from_number)
 
@@ -32,12 +44,8 @@ async def whatsapp_webhook(request: Request):
         await handle_cancellation(from_number)
 
     else:
-        # All other messages — route to intake agent
-        # We'll build this in the next step
         await handle_intake_reply(from_number, original_body)
 
-    # Twilio expects a 200 response with empty TwiML
-    # If we return anything else, Twilio retries — don't do that
     return Response(
         content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
         media_type="application/xml",
@@ -52,17 +60,15 @@ async def handle_confirmation(phone: str) -> None:
     from app.models.booking import Booking
     from app.models.slot import Slot
     from sqlalchemy import and_
-    from datetime import date, datetime
+    from datetime import date
 
     db = SessionLocal()
     try:
-        # Find user by phone
         user = db.query(User).filter(User.phone == phone).first()
         if not user:
             logger.warning(f"No user found for phone {phone}")
             return
 
-        # Find their next upcoming unconfirmed booking
         booking = (
             db.query(Booking)
             .join(Slot)
@@ -125,7 +131,6 @@ async def handle_cancellation(phone: str) -> None:
         )
 
         if booking:
-            # Cancel booking + release slot
             booking.status = "cancelled"
             slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
             if slot:
@@ -138,7 +143,6 @@ async def handle_cancellation(phone: str) -> None:
                 "Open Phila to rebook when you're ready. Take care! 🙏"
             )
 
-            # Notify first person on waitlist
             if slot:
                 waiting = (
                     db.query(Waitlist)
@@ -176,12 +180,61 @@ async def handle_cancellation(phone: str) -> None:
 
 async def handle_intake_reply(phone: str, message: str) -> None:
     """
-    Route to intake agent — we'll build this fully in the next step.
-    For now just echo back so we can test the webhook is working.
+    Routes incoming message to either:
+    - Intake agent (if active intake conversation)
+    - Follow-up agent (if active follow-up window)
+    - Generic response (otherwise)
     """
-    logger.info(f"Intake reply from {phone}: {message}")
-    # Placeholder — intake agent wired in next step
+    import redis
+    import json
+    from app.core.config import settings as app_settings
+    from app.services.conversation_state import get_conversation
+
+    # Check intake
+    state = get_conversation(phone)
+    if state["stage"] == "in_progress":
+        from app.services.intake_agent import process_intake_reply
+        response = process_intake_reply(phone, message)
+        send_whatsapp_message(phone, response)
+        return
+
+    # Check follow-up
+    r = redis.from_url(app_settings.REDIS_URL, decode_responses=True)
+    followup_data = r.get(f"followup:{phone}")
+
+    if followup_data:
+        data = json.loads(followup_data)
+        from app.services.followup_agent import assess_followup_response
+
+        result = assess_followup_response(
+            patient_message=message,
+            patient_name=data["patient_name"],
+            doctor_name=data["doctor_name"],
+            booking_id=data["booking_id"],
+        )
+
+        # Handle crisis in follow-up
+        if result["crisis"]["crisis_detected"]:
+            send_whatsapp_message(phone, result["crisis"]["response_text"])
+            if result["crisis"]["severity"] == "high":
+                r.delete(f"followup:{phone}")
+                return
+
+        response_msg = result["response_message"]
+
+        if result["should_rebook"]:
+            response_msg += (
+                "\n\nWould you like to book a follow-up appointment? "
+                "Open the Phila app to find your doctor. 📱"
+            )
+
+        send_whatsapp_message(phone, response_msg)
+        r.delete(f"followup:{phone}")
+        return
+
+    # No active conversation
     send_whatsapp_message(
         phone,
-        f"Got your message: '{message}'. Our assistant will respond shortly."
+        "Hi! Open the Phila app to book an appointment. "
+        "Our assistant will reach out before your visit. 🏥"
     )

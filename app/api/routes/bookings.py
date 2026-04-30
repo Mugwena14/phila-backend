@@ -19,7 +19,11 @@ from app.schemas.booking import (
 )
 from app.services.risk_service import calculate_risk_score
 from app.services.whatsapp import send_whatsapp_message
-from app.tasks.whatsapp_tasks import send_intake_whatsapp, send_appointment_reminder
+from app.tasks.whatsapp_tasks import (
+    send_intake_whatsapp,
+    send_appointment_reminder,
+    send_followup_whatsapp,
+)
 from app.core.security import decode_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import logging
@@ -49,14 +53,12 @@ def create_booking(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Check slot exists and is available
     slot = db.query(Slot).filter(Slot.id == data.slot_id).first()
     if not slot:
         raise HTTPException(status_code=404, detail="Slot not found")
     if slot.status != "available":
         raise HTTPException(status_code=400, detail="Slot is no longer available")
 
-    # Check patient doesn't already have a booking with this doctor on this date
     existing = (
         db.query(Booking)
         .join(Slot)
@@ -74,16 +76,11 @@ def create_booking(
             detail="You already have a booking with this doctor on this date"
         )
 
-    # Calculate days until appointment for risk scoring
     days_until = (slot.date - date.today()).days
-
-    # Calculate risk score
     risk = calculate_risk_score(db, current_user.id, days_until)
 
-    # Lock the slot
     slot.status = "booked"
 
-    # Create the booking
     booking = Booking(
         patient_id=current_user.id,
         doctor_id=slot.doctor_id,
@@ -99,8 +96,9 @@ def create_booking(
     # ── WEEK 4 AGENT TASKS ──────────────────────────────────────────
 
     booking_id = str(booking.id)
+    appt_datetime = datetime.combine(slot.date, slot.start_time)
 
-    # 1. Intake agent — fires 60 seconds after booking
+    # 1. Intake agent — fires 10 seconds after booking
     send_intake_whatsapp.apply_async(
         args=[booking_id],
         countdown=10,
@@ -108,9 +106,8 @@ def create_booking(
     logger.info(f"Intake task queued for booking {booking_id}")
 
     # 2. No-show prevention — reminder ladder based on risk score
-    appt_datetime = datetime.combine(slot.date, slot.start_time)
 
-    # 24hr reminder — every patient gets this
+    # 24hr reminder — every patient
     remind_24hr = appt_datetime - timedelta(hours=24)
     if remind_24hr > datetime.now():
         send_appointment_reminder.apply_async(
@@ -119,7 +116,7 @@ def create_booking(
         )
         logger.info(f"24hr reminder queued for booking {booking_id}")
 
-    # 2hr reminder — every patient gets this
+    # 2hr reminder — every patient
     remind_2hr = appt_datetime - timedelta(hours=2)
     if remind_2hr > datetime.now():
         send_appointment_reminder.apply_async(
@@ -128,7 +125,7 @@ def create_booking(
         )
         logger.info(f"2hr reminder queued for booking {booking_id}")
 
-    # 48hr reminder — medium and high risk only (score >= 30)
+    # 48hr reminder — medium and high risk (score >= 30)
     if risk >= 30:
         remind_48hr = appt_datetime - timedelta(hours=48)
         if remind_48hr > datetime.now():
@@ -147,6 +144,14 @@ def create_booking(
                 eta=remind_72hr,
             )
             logger.info(f"72hr reminder queued for booking {booking_id} (risk: {risk})")
+
+    # 3. Follow-up agent — fires 3 days after appointment
+    followup_time = appt_datetime + timedelta(days=3)
+    send_followup_whatsapp.apply_async(
+        args=[booking_id],
+        eta=followup_time,
+    )
+    logger.info(f"Follow-up task queued for booking {booking_id} at {followup_time}")
 
     # ────────────────────────────────────────────────────────────────
 
@@ -257,7 +262,6 @@ def cancel_booking(
 
     db.commit()
 
-    # Notify first person on waitlist + send them a WhatsApp
     waiting = (
         db.query(Waitlist)
         .filter(
@@ -273,7 +277,6 @@ def cancel_booking(
         waiting.status = "notified"
         db.commit()
 
-        # Week 4 — fire WhatsApp to waitlist patient
         waiting_user = db.query(User).filter(
             User.id == waiting.patient_id
         ).first()

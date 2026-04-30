@@ -30,3 +30,9 @@ class Booking(Base):
     patient = relationship("User", foreign_keys=[patient_id])
     doctor = relationship("Doctor", foreign_keys=[doctor_id])
     slot = relationship("Slot", foreign_keys=[slot_id])
+
+    # none / low / high
+    crisis_flag = Column(String, nullable=True)  
+
+    # improving / not_improving / unclear
+    outcome = Column(String, nullable=True)  
