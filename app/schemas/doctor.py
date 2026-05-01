@@ -55,6 +55,7 @@ class SlotResponse(BaseModel):
     start_time: str
     end_time: str
     status: str
+    blocked_reason: Optional[str] = None
 
     class Config:
         from_attributes = True

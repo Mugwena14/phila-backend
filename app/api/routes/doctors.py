@@ -43,7 +43,6 @@ def register_doctor(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Check if doctor profile already exists
     existing = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
     if existing:
         raise HTTPException(status_code=400, detail="Doctor profile already exists")
@@ -64,9 +63,8 @@ def register_doctor(
         languages=data.languages,
     )
     db.add(doctor)
-    db.flush()  # Get the doctor ID before commit
+    db.flush()
 
-    # Save working hours
     for wh in data.working_hours:
         working_hours = WorkingHours(
             doctor_id=doctor.id,
@@ -80,15 +78,13 @@ def register_doctor(
     db.commit()
     db.refresh(doctor)
 
-    # Generate slots for next 14 days
     from app.services.slot_service import generate_slots_for_day
-    from datetime import timedelta
     for i in range(14):
         target = date.today() + timedelta(days=i)
         generate_slots_for_day(db, doctor, target)
-    
 
     return doctor
+
 
 @router.get("/search", response_model=List[DoctorResponse])
 def general_search(
@@ -136,8 +132,6 @@ def search_doctors(
     if name:
         query = query.filter(Doctor.practice_name.ilike(f"%{name}%"))
 
-    # If a general query is passed that matches neither specialty nor name
-    # search across both fields using OR
     return query.all()
 
 
@@ -164,8 +158,14 @@ def get_doctor(doctor_id: UUID, db: Session = Depends(get_db)):
 def get_doctor_slots(
     doctor_id: UUID,
     date: Optional[date] = None,
+    dashboard: Optional[bool] = False,
     db: Session = Depends(get_db),
 ):
+    """
+    Get slots for a doctor on a given date.
+    dashboard=true  → returns ALL slots (available + booked + blocked)
+    dashboard=false → returns only available slots (patient app)
+    """
     doctor = db.query(Doctor).filter(Doctor.id == doctor_id).first()
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor not found")
@@ -176,16 +176,17 @@ def get_doctor_slots(
     from app.services.slot_service import generate_slots_for_day
     generate_slots_for_day(db, doctor, target_date)
 
-    slots = (
-        db.query(Slot)
-        .filter(
-            Slot.doctor_id == doctor_id,
-            Slot.date == target_date,
-            Slot.status == "available",
-        )
-        .order_by(Slot.start_time)
-        .all()
+    query = db.query(Slot).filter(
+        Slot.doctor_id == doctor_id,
+        Slot.date == target_date,
     )
+
+    # Patient app only sees available slots
+    # Dashboard sees everything — available, booked, blocked
+    if not dashboard:
+        query = query.filter(Slot.status == "available")
+
+    slots = query.order_by(Slot.start_time).all()
 
     return [
         SlotResponse(
@@ -195,8 +196,7 @@ def get_doctor_slots(
             start_time=str(s.start_time),
             end_time=str(s.end_time),
             status=s.status,
+            blocked_reason=getattr(s, 'blocked_reason', None),
         )
         for s in slots
     ]
-
-

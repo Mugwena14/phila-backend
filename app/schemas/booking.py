@@ -30,7 +30,7 @@ class BookingResponse(BaseModel):
     risk_score: str
     crisis_flag: Optional[str] = None
     outcome: Optional[str] = None
-    is_walk_in: bool = False
+    is_walk_in: Optional[bool] = False
     arrived_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
