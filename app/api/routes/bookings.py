@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from datetime import datetime, date, timedelta
 from uuid import UUID
 
@@ -14,6 +14,8 @@ from app.schemas.booking import (
     BookingCreate,
     BookingResponse,
     BookingDetailResponse,
+    BookingUpdate,
+    WalkInBookingCreate,
     WaitlistCreate,
     WaitlistResponse,
 )
@@ -29,6 +31,9 @@ from app.core.security import decode_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import text
 import logging
+import random
+import string
+import json
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 security = HTTPBearer()
@@ -90,6 +95,7 @@ def create_booking(
         reason=data.reason,
         risk_score=str(risk),
         status="confirmed",
+        is_walk_in=False,
     )
     db.add(booking)
     db.commit()
@@ -108,7 +114,6 @@ def create_booking(
     logger.info(f"Intake task queued for booking {booking_id}")
 
     # 2. Intake completion check — fires 30 minutes later
-    # If patient hasn't completed intake, bumps risk score +20
     check_intake_completion.apply_async(
         args=[booking_id],
         countdown=1800,
@@ -117,7 +122,6 @@ def create_booking(
 
     # 3. No-show prevention — reminder ladder based on risk score
 
-    # 24hr reminder — every patient
     remind_24hr = appt_datetime - timedelta(hours=24)
     if remind_24hr > datetime.now():
         send_appointment_reminder.apply_async(
@@ -126,7 +130,6 @@ def create_booking(
         )
         logger.info(f"24hr reminder queued for booking {booking_id}")
 
-    # 2hr reminder — every patient
     remind_2hr = appt_datetime - timedelta(hours=2)
     if remind_2hr > datetime.now():
         send_appointment_reminder.apply_async(
@@ -135,7 +138,6 @@ def create_booking(
         )
         logger.info(f"2hr reminder queued for booking {booking_id}")
 
-    # 48hr reminder — medium and high risk (score >= 30)
     if risk >= 30:
         remind_48hr = appt_datetime - timedelta(hours=48)
         if remind_48hr > datetime.now():
@@ -145,7 +147,6 @@ def create_booking(
             )
             logger.info(f"48hr reminder queued for booking {booking_id} (risk: {risk})")
 
-    # 72hr reminder — high risk only (score >= 65)
     if risk >= 65:
         remind_72hr = appt_datetime - timedelta(hours=72)
         if remind_72hr > datetime.now():
@@ -168,6 +169,179 @@ def create_booking(
     return booking
 
 
+@router.post("/walk-in", response_model=BookingDetailResponse, status_code=201)
+def create_walk_in_booking(
+    data: WalkInBookingCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Create a booking for a walk-in patient.
+    If patient phone exists as real account → use it.
+    If phone exists as WALKIN_ record → reuse it.
+    Otherwise → create new WALKIN_ record.
+    """
+    # Find doctor
+    doctor = db.query(Doctor).filter(
+        Doctor.user_id == current_user.id
+    ).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+    # Check for existing real account first
+    patient = db.query(User).filter(
+        User.phone == data.patient_phone,
+        User.is_walk_in == False,
+    ).first()
+
+    if not patient:
+        # Check for existing walk-in record
+        walkin_phone = f"WALKIN_{data.patient_phone}"
+        patient = db.query(User).filter(
+            User.phone == walkin_phone,
+        ).first()
+
+    if not patient:
+        # Create new walk-in patient
+        claim_code = "PHILA-" + "".join(
+            random.choices(string.ascii_uppercase + string.digits, k=4)
+        )
+        walkin_phone = f"WALKIN_{data.patient_phone}"
+        patient = User(
+            full_name=data.patient_name,
+            email=f"walkin_{claim_code.lower()}@phila.local",
+            phone=walkin_phone,
+            role="patient",
+            is_walk_in=True,
+            claim_code=claim_code,
+            claimed=False,
+            hashed_password="WALKIN_NO_PASSWORD",
+        )
+        db.add(patient)
+        db.flush()
+        logger.info(f"Walk-in patient created: {patient.full_name} — claim code: {claim_code}")
+
+    # Get slot if provided
+    slot = None
+    if data.slot_id:
+        slot = db.query(Slot).filter(Slot.id == data.slot_id).first()
+        if not slot or slot.status != "available":
+            raise HTTPException(status_code=400, detail="Slot not available")
+        slot.status = "booked"
+
+    # Create booking
+    booking = Booking(
+        patient_id=patient.id,
+        doctor_id=doctor.id,
+        slot_id=slot.id if slot else None,
+        reason=data.reason,
+        receptionist_note=data.receptionist_note,
+        risk_score="20",
+        status="confirmed",
+        is_walk_in=True,
+    )
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
+
+    logger.info(f"Walk-in booking created: {booking.id} for {patient.full_name}")
+
+    return BookingDetailResponse(
+        id=booking.id,
+        patient_id=booking.patient_id,
+        doctor_id=booking.doctor_id,
+        slot_id=booking.slot_id,
+        status=booking.status,
+        reason=booking.reason,
+        receptionist_note=booking.receptionist_note,
+        risk_score=booking.risk_score,
+        is_walk_in=True,
+        created_at=booking.created_at,
+        slot_date=str(slot.date) if slot else None,
+        slot_start_time=str(slot.start_time) if slot else None,
+        slot_end_time=str(slot.end_time) if slot else None,
+        practice_name=doctor.practice_name,
+        specialty=doctor.specialty,
+    )
+
+
+@router.patch("/{booking_id}/status", status_code=200)
+def update_booking_status(
+    booking_id: UUID,
+    data: BookingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update booking status — arrived, in_consultation, completed, no_show."""
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    if data.status:
+        booking.status = data.status
+
+        if data.status == "arrived":
+            booking.arrived_at = datetime.now()
+            logger.info(f"Booking {booking_id} — patient arrived")
+
+        elif data.status == "completed":
+            booking.completed_at = datetime.now()
+            logger.info(f"Booking {booking_id} — consultation completed")
+
+        elif data.status == "no_show":
+            # Bump risk score
+            current = int(booking.risk_score or "0")
+            booking.risk_score = str(min(current + 25, 100))
+            # Release slot
+            slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
+            if slot:
+                slot.status = "available"
+            logger.info(f"Booking {booking_id} — no-show. Risk bumped to {booking.risk_score}")
+
+    if data.reason is not None:
+        booking.reason = data.reason
+    if data.receptionist_note is not None:
+        booking.receptionist_note = data.receptionist_note
+
+    db.commit()
+    return {"message": "Booking updated", "status": booking.status}
+
+
+@router.patch("/{booking_id}/move", status_code=200)
+def move_booking(
+    booking_id: UUID,
+    new_slot_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Move booking to a different slot. Old slot released automatically."""
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    new_slot = db.query(Slot).filter(Slot.id == new_slot_id).first()
+    if not new_slot or new_slot.status != "available":
+        raise HTTPException(status_code=400, detail="New slot not available")
+
+    # Release old slot
+    old_slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
+    if old_slot:
+        old_slot.status = "available"
+
+    # Assign new slot
+    new_slot.status = "booked"
+    booking.slot_id = new_slot.id
+    db.commit()
+
+    logger.info(f"Booking {booking_id} moved to slot {new_slot_id}")
+
+    return {
+        "message": "Booking moved successfully",
+        "new_date": str(new_slot.date),
+        "new_time": str(new_slot.start_time),
+    }
+
+
 @router.get("/my", response_model=List[BookingDetailResponse])
 def get_my_bookings(
     db: Session = Depends(get_db),
@@ -185,7 +359,6 @@ def get_my_bookings(
         slot = db.query(Slot).filter(Slot.id == b.slot_id).first()
         doctor = db.query(Doctor).filter(Doctor.id == b.doctor_id).first()
 
-        # Check intake status
         brief = db.execute(
             text("SELECT id FROM intake_briefs WHERE booking_id = :id"),
             {"id": str(b.id)}
@@ -203,6 +376,7 @@ def get_my_bookings(
                 risk_score=b.risk_score,
                 crisis_flag=getattr(b, 'crisis_flag', None),
                 intake_status=intake_status,
+                is_walk_in=getattr(b, 'is_walk_in', False),
                 created_at=b.created_at,
                 slot_date=str(slot.date) if slot else None,
                 slot_start_time=str(slot.start_time) if slot else None,
@@ -225,10 +399,7 @@ def get_practice_bookings(
 
     bookings = (
         db.query(Booking)
-        .filter(
-            Booking.doctor_id == doctor.id,
-            Booking.status == "confirmed",
-        )
+        .filter(Booking.doctor_id == doctor.id)
         .order_by(Booking.created_at.desc())
         .all()
     )
@@ -238,7 +409,6 @@ def get_practice_bookings(
         slot = db.query(Slot).filter(Slot.id == b.slot_id).first()
         patient = db.query(User).filter(User.id == b.patient_id).first()
 
-        # Check intake status + fetch brief
         brief = db.execute(
             text("""
                 SELECT main_concern, duration, severity, medications,
@@ -252,9 +422,7 @@ def get_practice_bookings(
         intake_status = "complete" if brief else "pending"
         intake_brief = dict(brief._mapping) if brief else None
 
-        # Parse JSON strings back to lists
         if intake_brief:
-            import json
             try:
                 intake_brief["medications"] = json.loads(
                     intake_brief.get("medications", "[]")
@@ -276,10 +444,14 @@ def get_practice_bookings(
                 slot_id=b.slot_id,
                 status=b.status,
                 reason=b.reason,
+                receptionist_note=getattr(b, 'receptionist_note', None),
                 risk_score=b.risk_score,
                 crisis_flag=getattr(b, 'crisis_flag', None),
                 intake_status=intake_status,
                 intake_brief=intake_brief,
+                is_walk_in=getattr(b, 'is_walk_in', False),
+                arrived_at=getattr(b, 'arrived_at', None),
+                completed_at=getattr(b, 'completed_at', None),
                 created_at=b.created_at,
                 slot_date=str(slot.date) if slot else None,
                 slot_start_time=str(slot.start_time) if slot else None,
@@ -305,7 +477,7 @@ def cancel_booking(
     if str(booking.patient_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not your booking")
 
-    if booking.status != "confirmed":
+    if booking.status not in ["confirmed", "arrived"]:
         raise HTTPException(status_code=400, detail="Booking already cancelled or completed")
 
     booking.status = "cancelled"

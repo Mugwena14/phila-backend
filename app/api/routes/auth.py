@@ -12,20 +12,61 @@ from app.core.security import decode_token
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/register", response_model=UserResponse, status_code=201)
-def register(user_in: UserCreate, db: Session = Depends(get_db)):
-    # Check if email already exists
-    existing = db.query(User).filter(User.email == user_in.email).first()
-    if existing:
+def register(data: UserCreate, db: Session = Depends(get_db)):
+    # Check if email exists
+    if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
+    # Check if phone exists as real account
+    if db.query(User).filter(
+        User.phone == data.phone,
+        User.is_walk_in == False
+    ).first():
+        raise HTTPException(status_code=400, detail="Phone already registered")
+
+    hashed = hash_password(data.password)
     user = User(
-        full_name=user_in.full_name,
-        email=user_in.email,
-        phone=user_in.phone,
-        hashed_password=hash_password(user_in.password),
-        language_pref=user_in.language_pref,
+        full_name=data.full_name,
+        email=data.email,
+        phone=data.phone,
+        role=data.role,
+        hashed_password=hashed,
+        language_pref=data.language_pref,
+        is_walk_in=False,
     )
     db.add(user)
+    db.flush()
+
+    # ── WALK-IN CLAIM FLOW ──────────────────────────────────────────
+    # Check if a walk-in record exists with WALKIN_ prefix
+    walkin_phone = f"WALKIN_{data.phone}"
+    walkin_user = db.query(User).filter(
+        User.phone == walkin_phone,
+        User.claimed == False,
+    ).first()
+
+    if walkin_user:
+        # Merge walk-in bookings to new account
+        from app.models.booking import Booking
+        db.query(Booking).filter(
+            Booking.patient_id == walkin_user.id
+        ).update({"patient_id": user.id})
+
+        # Merge documents
+        from app.models.patient_document import PatientDocument
+        db.query(PatientDocument).filter(
+            PatientDocument.patient_id == walkin_user.id
+        ).update({"patient_id": user.id})
+
+        # Mark walk-in as claimed
+        walkin_user.claimed = True
+        walkin_user.claimed_by = user.id
+
+        logger.info(
+            f"Walk-in record {walkin_user.id} claimed by new user {user.id}"
+        )
+    # ────────────────────────────────────────────────────────────────
+
     db.commit()
     db.refresh(user)
     return user

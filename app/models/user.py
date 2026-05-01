@@ -23,3 +23,6 @@ class User(Base):
     language_pref = Column(String, default="en")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    is_walk_in = Column(Boolean, default=False)
+    claim_code = Column(String, nullable=True)
+    claimed = Column(Boolean, default=False)

@@ -9,3 +9,4 @@ from app.models.patient_profile import PatientProfile
 from app.models.intake_brief import IntakeBrief
 from app.models.patient_health_summary import PatientHealthSummary
 from app.models.patient_medication import PatientMedication
+from app.models.patient_document import PatientDocument
