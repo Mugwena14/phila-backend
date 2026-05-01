@@ -8,6 +8,10 @@ from app.models.patient_profile import PatientProfile
 from app.schemas.patient_profile import PatientProfileUpdate, PatientProfileResponse
 from app.core.security import decode_token
 
+from sqlalchemy import text
+from uuid import UUID
+from app.models.doctor import Doctor
+
 router = APIRouter(prefix="/patients", tags=["patients"])
 security = HTTPBearer()
 
@@ -71,3 +75,63 @@ def update_patient_profile(
     db.commit()
     db.refresh(profile)
     return profile
+
+
+@router.get("/")
+def get_all_patients(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get all patients who have booked with this doctor."""
+    from app.models.booking import Booking
+
+    doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+    # Get all unique patient IDs from bookings
+    patient_ids = db.execute(
+        text("SELECT DISTINCT patient_id FROM bookings WHERE doctor_id = :doc_id"),
+        {"doc_id": str(doctor.id)}
+    ).fetchall()
+
+    patients = []
+    for row in patient_ids:
+        patient = db.query(User).filter(User.id == row.patient_id).first()
+        if patient:
+            patients.append({
+                "id": str(patient.id),
+                "full_name": patient.full_name,
+                "phone": patient.phone,
+                "is_walk_in": getattr(patient, 'is_walk_in', False),
+                "claim_code": getattr(patient, 'claim_code', None),
+                "claimed": getattr(patient, 'claimed', False),
+                "created_at": str(patient.created_at) if patient.created_at else None,
+            })
+
+    return patients
+
+
+@router.get("/{patient_id}/medications")
+def get_patient_medications(
+    patient_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get all tracked medications for a patient."""
+    from app.models.patient_medication import PatientMedication
+
+    meds = db.query(PatientMedication).filter(
+        PatientMedication.patient_id == patient_id
+    ).all()
+
+    return [
+        {
+            "id": str(m.id),
+            "medication_name": m.medication_name,
+            "last_prescribed_date": m.last_prescribed_date,
+            "estimated_refill_date": m.estimated_refill_date,
+            "refill_notified": m.refill_notified,
+        }
+        for m in meds
+    ]
