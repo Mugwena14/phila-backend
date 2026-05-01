@@ -7,3 +7,5 @@ from app.models.booking import Booking
 from app.models.waitlist import Waitlist
 from app.models.patient_profile import PatientProfile
 from app.models.intake_brief import IntakeBrief
+from app.models.patient_health_summary import PatientHealthSummary
+from app.models.patient_medication import PatientMedication

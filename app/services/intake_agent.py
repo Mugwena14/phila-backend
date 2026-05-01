@@ -138,11 +138,13 @@ def _finalise_intake(phone: str, state: dict) -> str:
     Called when max turns reached.
     Makes a second Claude call to produce a structured brief.
     Saves brief to database.
+    Triggers medication extraction task.
     """
     patient_first = state.get("patient_name", "").split()[0]
     doctor = state.get("doctor_name", "your doctor")
     appt_date = state.get("appt_date", "")
     appt_time = state.get("appt_time", "")
+    booking_id = state.get("booking_id")
 
     # Build success message upfront — always returned regardless of brief outcome
     success_message = (
@@ -191,8 +193,16 @@ Be concise and clinical. This goes directly to the doctor.""",
         brief_data = json.loads(brief_text)
         brief_data["crisis_flagged"] = state.get("crisis_flagged", False)
 
-        _save_brief_to_db(state.get("booking_id"), brief_data)
+        _save_brief_to_db(booking_id, brief_data)
         logger.info(f"Brief saved successfully for {phone}")
+
+        # Trigger medication extraction — runs async via Celery
+        try:
+            from app.tasks.health_tasks import extract_and_save_medications
+            extract_and_save_medications.delay(booking_id)
+            logger.info(f"Medication extraction queued for booking {booking_id}")
+        except Exception as e:
+            logger.error(f"Error queuing medication extraction: {e}")
 
     except Exception as e:
         logger.error(f"Error generating brief for {phone}: {e}")
@@ -202,6 +212,7 @@ Be concise and clinical. This goes directly to the doctor.""",
         clear_conversation(phone)
 
     return success_message
+
 
 def _save_brief_to_db(booking_id: str, brief_data: dict) -> None:
     """Save structured brief to intake_briefs table."""
@@ -252,6 +263,7 @@ def _save_brief_to_db(booking_id: str, brief_data: dict) -> None:
         logger.error(f"Error saving brief: {e}")
     finally:
         db.close()
+
 
 def _flag_crisis_in_db(booking_id: str, severity: str) -> None:
     """Flag crisis on the booking record."""
