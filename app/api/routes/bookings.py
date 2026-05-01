@@ -23,9 +23,11 @@ from app.tasks.whatsapp_tasks import (
     send_intake_whatsapp,
     send_appointment_reminder,
     send_followup_whatsapp,
+    check_intake_completion,
 )
 from app.core.security import decode_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import text
 import logging
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
@@ -105,7 +107,15 @@ def create_booking(
     )
     logger.info(f"Intake task queued for booking {booking_id}")
 
-    # 2. No-show prevention — reminder ladder based on risk score
+    # 2. Intake completion check — fires 30 minutes later
+    # If patient hasn't completed intake, bumps risk score +20
+    check_intake_completion.apply_async(
+        args=[booking_id],
+        countdown=1800,
+    )
+    logger.info(f"Intake completion check queued for booking {booking_id}")
+
+    # 3. No-show prevention — reminder ladder based on risk score
 
     # 24hr reminder — every patient
     remind_24hr = appt_datetime - timedelta(hours=24)
@@ -145,7 +155,7 @@ def create_booking(
             )
             logger.info(f"72hr reminder queued for booking {booking_id} (risk: {risk})")
 
-    # 3. Follow-up agent — fires 3 days after appointment
+    # 4. Follow-up agent — fires 3 days after appointment
     followup_time = appt_datetime + timedelta(days=3)
     send_followup_whatsapp.apply_async(
         args=[booking_id],
@@ -174,6 +184,14 @@ def get_my_bookings(
     for b in bookings:
         slot = db.query(Slot).filter(Slot.id == b.slot_id).first()
         doctor = db.query(Doctor).filter(Doctor.id == b.doctor_id).first()
+
+        # Check intake status
+        brief = db.execute(
+            text("SELECT id FROM intake_briefs WHERE booking_id = :id"),
+            {"id": str(b.id)}
+        ).fetchone()
+        intake_status = "complete" if brief else "pending"
+
         result.append(
             BookingDetailResponse(
                 id=b.id,
@@ -183,6 +201,8 @@ def get_my_bookings(
                 status=b.status,
                 reason=b.reason,
                 risk_score=b.risk_score,
+                crisis_flag=getattr(b, 'crisis_flag', None),
+                intake_status=intake_status,
                 created_at=b.created_at,
                 slot_date=str(slot.date) if slot else None,
                 slot_start_time=str(slot.start_time) if slot else None,
@@ -217,6 +237,37 @@ def get_practice_bookings(
     for b in bookings:
         slot = db.query(Slot).filter(Slot.id == b.slot_id).first()
         patient = db.query(User).filter(User.id == b.patient_id).first()
+
+        # Check intake status + fetch brief
+        brief = db.execute(
+            text("""
+                SELECT main_concern, duration, severity, medications,
+                       allergies, additional_notes, crisis_flagged, language_used
+                FROM intake_briefs
+                WHERE booking_id = :id
+            """),
+            {"id": str(b.id)}
+        ).fetchone()
+
+        intake_status = "complete" if brief else "pending"
+        intake_brief = dict(brief._mapping) if brief else None
+
+        # Parse JSON strings back to lists
+        if intake_brief:
+            import json
+            try:
+                intake_brief["medications"] = json.loads(
+                    intake_brief.get("medications", "[]")
+                )
+            except Exception:
+                intake_brief["medications"] = []
+            try:
+                intake_brief["allergies"] = json.loads(
+                    intake_brief.get("allergies", "[]")
+                )
+            except Exception:
+                intake_brief["allergies"] = []
+
         result.append(
             BookingDetailResponse(
                 id=b.id,
@@ -226,6 +277,9 @@ def get_practice_bookings(
                 status=b.status,
                 reason=b.reason,
                 risk_score=b.risk_score,
+                crisis_flag=getattr(b, 'crisis_flag', None),
+                intake_status=intake_status,
+                intake_brief=intake_brief,
                 created_at=b.created_at,
                 slot_date=str(slot.date) if slot else None,
                 slot_start_time=str(slot.start_time) if slot else None,

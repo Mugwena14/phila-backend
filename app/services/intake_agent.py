@@ -203,22 +203,22 @@ Be concise and clinical. This goes directly to the doctor.""",
 
     return success_message
 
-
 def _save_brief_to_db(booking_id: str, brief_data: dict) -> None:
     """Save structured brief to intake_briefs table."""
     from app.db.database import SessionLocal
     from sqlalchemy import text
+    import uuid
 
     db = SessionLocal()
     try:
         db.execute(
             text("""
                 INSERT INTO intake_briefs
-                    (booking_id, main_concern, duration, severity,
+                    (id, booking_id, main_concern, duration, severity,
                      medications, allergies, additional_notes,
                      language_used, crisis_flagged, raw_brief)
                 VALUES
-                    (:booking_id, :main_concern, :duration, :severity,
+                    (:id, :booking_id, :main_concern, :duration, :severity,
                      :medications, :allergies, :additional_notes,
                      :language_used, :crisis_flagged, :raw_brief)
                 ON CONFLICT (booking_id) DO UPDATE SET
@@ -233,6 +233,7 @@ def _save_brief_to_db(booking_id: str, brief_data: dict) -> None:
                     raw_brief = EXCLUDED.raw_brief
             """),
             {
+                "id": str(uuid.uuid4()),
                 "booking_id": booking_id,
                 "main_concern": brief_data.get("main_concern", ""),
                 "duration": brief_data.get("duration", ""),
@@ -251,7 +252,6 @@ def _save_brief_to_db(booking_id: str, brief_data: dict) -> None:
         logger.error(f"Error saving brief: {e}")
     finally:
         db.close()
-
 
 def _flag_crisis_in_db(booking_id: str, severity: str) -> None:
     """Flag crisis on the booking record."""

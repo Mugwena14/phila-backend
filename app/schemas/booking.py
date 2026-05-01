@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from uuid import UUID
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 class BookingCreate(BaseModel):
     slot_id: UUID
@@ -27,6 +27,9 @@ class BookingDetailResponse(BookingResponse):
     doctor_name: Optional[str] = None
     practice_name: Optional[str] = None
     specialty: Optional[str] = None
+    intake_status: Optional[str] = None
+    intake_brief: Optional[Any] = None
+    crisis_flag: Optional[str] = None
 
 class WaitlistCreate(BaseModel):
     doctor_id: UUID

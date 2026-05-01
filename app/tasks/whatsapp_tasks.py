@@ -207,3 +207,79 @@ def send_followup_whatsapp(self, booking_id: str):
         raise self.retry(exc=e, countdown=300)
     finally:
         db.close()
+
+@celery_app.task(bind=True, max_retries=1)
+def check_intake_completion(self, booking_id: str):
+    """
+    Fires 30 minutes after intake message sent.
+    If patient hasn't completed intake, bump risk score +20
+    and send a gentle nudge.
+    """
+    import redis
+    import json
+    from app.core.config import settings as app_settings
+    from sqlalchemy import text
+
+    db = SessionLocal()
+    try:
+        booking = db.query(Booking).filter(
+            Booking.id == booking_id
+        ).first()
+
+        if not booking or booking.status != "confirmed":
+            return
+
+        patient = db.query(User).filter(
+            User.id == booking.patient_id
+        ).first()
+
+        if not patient:
+            return
+
+        # Check if intake brief exists in DB
+        result = db.execute(
+            text("SELECT id FROM intake_briefs WHERE booking_id = :id"),
+            {"id": booking_id}
+        ).fetchone()
+
+        if result:
+            # Intake completed — nothing to do
+            logger.info(f"Intake already complete for booking {booking_id}")
+            return
+
+        # Check Redis conversation state
+        r = redis.from_url(app_settings.REDIS_URL, decode_responses=True)
+        state_data = r.get(f"intake:{patient.phone}")
+
+        if state_data:
+            state = json.loads(state_data)
+            if state.get("stage") == "in_progress" and state.get("turn", 0) > 0:
+                # Patient started but didn't finish — don't nudge yet
+                logger.info(f"Intake in progress for booking {booking_id}")
+                return
+
+        # Intake not started or abandoned — bump risk score
+        current_risk = int(booking.risk_score or "0")
+        new_risk = min(current_risk + 20, 100)
+        booking.risk_score = str(new_risk)
+        db.commit()
+
+        logger.info(
+            f"Risk score bumped from {current_risk} to {new_risk} "
+            f"for booking {booking_id} — intake incomplete"
+        )
+
+        # Send a gentle nudge
+        send_whatsapp_message(
+            patient.phone,
+            f"Hi {patient.full_name.split()[0]}! 👋\n\n"
+            f"We noticed you haven't completed your pre-appointment "
+            f"questions yet.\n\n"
+            f"It only takes 2 minutes and helps your doctor prepare "
+            f"for your visit. Reply here to continue! 🏥"
+        )
+
+    except Exception as e:
+        logger.error(f"Error in check_intake_completion: {e}")
+    finally:
+        db.close()
