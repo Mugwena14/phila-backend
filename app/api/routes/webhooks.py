@@ -22,10 +22,12 @@ async def whatsapp_webhook(request: Request):
     logger.info(f"Incoming WhatsApp from {from_number}: {original_body}")
 
     # ── CHECK INTAKE STATE FIRST ─────────────────────────────────────
-    # If patient is mid-intake, ALL messages go to Claude
-    # regardless of content — even "yes", "no", "cancel"
     from app.services.conversation_state import get_conversation
     state = get_conversation(from_number)
+
+    # ── DEBUG — log full state so we can see what's happening ────────
+    logger.info(f"Conversation state for {from_number}: {state}")
+    # ─────────────────────────────────────────────────────────────────
 
     if state["stage"] == "in_progress":
         await handle_intake_reply(from_number, original_body)
@@ -34,7 +36,6 @@ async def whatsapp_webhook(request: Request):
             media_type="application/xml",
             status_code=200,
         )
-    # ─────────────────────────────────────────────────────────────────
 
     # Only reach YES/NO handler if NO active intake conversation
     if body in ["yes", "y", "confirm", "yes ✓"]:
@@ -192,6 +193,8 @@ async def handle_intake_reply(phone: str, message: str) -> None:
 
     # Check intake
     state = get_conversation(phone)
+    logger.info(f"handle_intake_reply — state stage: {state['stage']} for {phone}")
+
     if state["stage"] == "in_progress":
         from app.services.intake_agent import process_intake_reply
         response = process_intake_reply(phone, message)
@@ -213,7 +216,6 @@ async def handle_intake_reply(phone: str, message: str) -> None:
             booking_id=data["booking_id"],
         )
 
-        # Handle crisis in follow-up
         if result["crisis"]["crisis_detected"]:
             send_whatsapp_message(phone, result["crisis"]["response_text"])
             if result["crisis"]["severity"] == "high":
@@ -233,6 +235,7 @@ async def handle_intake_reply(phone: str, message: str) -> None:
         return
 
     # No active conversation
+    logger.info(f"No active conversation for {phone} — sending generic response")
     send_whatsapp_message(
         phone,
         "Hi! Open the Phila app to book an appointment. "

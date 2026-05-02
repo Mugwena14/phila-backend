@@ -48,14 +48,11 @@ def send_whatsapp_message(to_phone: str, message: str) -> bool:
         logger.error(f"Unexpected error sending WhatsApp to {to_phone}: {e}")
         return False
 
-
 def parse_incoming_message(form_data: dict) -> dict:
-    """
-    Parse Twilio webhook POST body into a clean dict.
-    Twilio sends form-encoded data, not JSON.
-    """
+    raw_from = form_data.get("From", "").replace("whatsapp:", "").strip()
+
     return {
-        "from_number": form_data.get("From", "").replace("whatsapp:", ""),
+        "from_number": raw_from,  # keep as +27XXXXXXXXX
         "to_number": form_data.get("To", "").replace("whatsapp:", ""),
         "body": form_data.get("Body", "").strip(),
         "message_sid": form_data.get("MessageSid", ""),

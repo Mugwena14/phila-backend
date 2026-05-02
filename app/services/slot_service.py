@@ -6,13 +6,17 @@ from app.models.slot import Slot
 from app.models.doctor import Doctor
 from app.models.working_hours import WorkingHours
 
+# Default hours used when no working_hours row exists for that day
+DEFAULT_START = time(8, 0)
+DEFAULT_END   = time(17, 0)
+
 def generate_slots_for_day(
     db: Session,
     doctor: Doctor,
     target_date: date,
 ) -> List[Slot]:
-    # Get working hours for this day of week
     day_of_week = target_date.weekday()  # 0=Mon, 6=Sun
+
     working_hours = (
         db.query(WorkingHours)
         .filter(
@@ -23,8 +27,14 @@ def generate_slots_for_day(
         .first()
     )
 
-    if not working_hours:
-        return []
+    # ── Use default hours if none configured for this day ──────────
+    if working_hours:
+        start_time = working_hours.start_time
+        end_time   = working_hours.end_time
+    else:
+        start_time = DEFAULT_START
+        end_time   = DEFAULT_END
+    # ───────────────────────────────────────────────────────────────
 
     # Check if slots already exist for this date
     existing = (
@@ -39,9 +49,9 @@ def generate_slots_for_day(
     slots = []
     duration = timedelta(minutes=doctor.slot_duration_minutes)
 
-    start_dt = datetime.combine(target_date, working_hours.start_time)
-    end_dt = datetime.combine(target_date, working_hours.end_time)
-    current = start_dt
+    start_dt = datetime.combine(target_date, start_time)
+    end_dt   = datetime.combine(target_date, end_time)
+    current  = start_dt
 
     while current + duration <= end_dt:
         slot = Slot(

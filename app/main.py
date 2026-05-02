@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.api.routes import auth, doctors, bookings, patients, webhooks, triage, slots, documents, copilot
+from app.api.routes import waiting_room
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -28,7 +29,7 @@ app.include_router(triage.router, prefix="/api/v1")
 app.include_router(slots.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(copilot.router, prefix="/api/v1")
-
+app.include_router(waiting_room.router, prefix="/api/v1")
 
 
 @app.get("/")

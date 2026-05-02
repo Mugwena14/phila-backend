@@ -36,10 +36,9 @@ class BlockSlotRequest(BaseModel):
     reason: Optional[str] = "Blocked"
 
 
-class BlockRangeRequest(BaseModel):
-    date: str
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
+class SlotRangeRequest(BaseModel):
+    start_date: str
+    end_date: str
     reason: Optional[str] = "Blocked"
 
 
@@ -85,46 +84,62 @@ def unblock_slot(
 
 
 @router.post("/block-range", status_code=200)
-def block_range(
-    data: BlockRangeRequest,
+def block_slot_range(
+    data: SlotRangeRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Get doctor profile
-    doctor = db.query(Doctor).filter(
-        Doctor.user_id == current_user.id
-    ).first()
+    from datetime import datetime as dt
+    doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
     if not doctor:
-        raise HTTPException(status_code=404, detail="Doctor profile not found")
+        raise HTTPException(status_code=404, detail="Doctor not found")
 
-    from datetime import datetime
-    target_date = datetime.strptime(data.date, "%Y-%m-%d").date()
+    start = dt.strptime(data.start_date, "%Y-%m-%d").date()
+    end   = dt.strptime(data.end_date,   "%Y-%m-%d").date()
 
-    query = db.query(Slot).filter(
+    slots = db.query(Slot).filter(
         Slot.doctor_id == doctor.id,
-        Slot.date == target_date,
+        Slot.date >= start,
+        Slot.date <= end,
         Slot.status == "available",
-    )
-
-    if data.start_time:
-        from datetime import time
-        start = datetime.strptime(data.start_time, "%H:%M").time()
-        query = query.filter(Slot.start_time >= start)
-
-    if data.end_time:
-        from datetime import time
-        end = datetime.strptime(data.end_time, "%H:%M").time()
-        query = query.filter(Slot.start_time <= end)
-
-    slots = query.all()
-    count = 0
+    ).all()
 
     for slot in slots:
         slot.status = "blocked"
         slot.blocked_reason = data.reason
         slot.blocked_by = current_user.id
-        count += 1
 
     db.commit()
+    logger.info(f"Blocked {len(slots)} slots from {data.start_date} to {data.end_date}")
+    return {"blocked": len(slots)}
 
-    return {"message": f"{count} slots blocked", "date": data.date}
+
+@router.post("/unblock-range", status_code=200)
+def unblock_slot_range(
+    data: SlotRangeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from datetime import datetime as dt
+    doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    start = dt.strptime(data.start_date, "%Y-%m-%d").date()
+    end   = dt.strptime(data.end_date,   "%Y-%m-%d").date()
+
+    slots = db.query(Slot).filter(
+        Slot.doctor_id == doctor.id,
+        Slot.date >= start,
+        Slot.date <= end,
+        Slot.status == "blocked",
+    ).all()
+
+    for slot in slots:
+        slot.status = "available"
+        slot.blocked_reason = None
+        slot.blocked_by = None
+
+    db.commit()
+    logger.info(f"Unblocked {len(slots)} slots from {data.start_date} to {data.end_date}")
+    return {"unblocked": len(slots)}
