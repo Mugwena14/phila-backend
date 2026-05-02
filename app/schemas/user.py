@@ -9,6 +9,7 @@ class UserCreate(BaseModel):
     phone: str
     password: str
     language_pref: str = "en"
+    role: str = "doctor"  # ← added
 
 class UserResponse(BaseModel):
     id: UUID
