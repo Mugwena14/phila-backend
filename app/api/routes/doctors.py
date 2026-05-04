@@ -17,6 +17,7 @@ from app.schemas.doctor import (
 )
 from app.services.slot_service import generate_slots_for_week
 from app.core.security import decode_token
+from app.utils.geocoding import geocode_address          # ← new
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 router = APIRouter(prefix="/doctors", tags=["doctors"])
@@ -38,7 +39,7 @@ def get_current_user(
 
 
 @router.post("/register", response_model=DoctorResponse, status_code=201)
-def register_doctor(
+async def register_doctor(                               # ← async now
     data: DoctorCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -62,6 +63,13 @@ def register_doctor(
         medical_aids=data.medical_aids,
         languages=data.languages,
     )
+
+    # ── Geocode the practice address ──────────────────────────────────────────
+    coords = await geocode_address(data.address, data.city, data.province)
+    if coords:
+        doctor.latitude, doctor.longitude = coords
+    # ─────────────────────────────────────────────────────────────────────────
+
     db.add(doctor)
     db.flush()
 
@@ -161,18 +169,12 @@ def get_doctor_slots(
     dashboard: Optional[bool] = False,
     db: Session = Depends(get_db),
 ):
-    """
-    Get slots for a doctor on a given date.
-    dashboard=true  → returns ALL slots (available + booked + blocked)
-    dashboard=false → returns only available slots (patient app)
-    """
     doctor = db.query(Doctor).filter(Doctor.id == doctor_id).first()
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor not found")
 
     target_date = date if date else datetime.today().date()
 
-    # Always try to generate — service checks for existing slots
     from app.services.slot_service import generate_slots_for_day
     generate_slots_for_day(db, doctor, target_date)
 
@@ -181,8 +183,6 @@ def get_doctor_slots(
         Slot.date == target_date,
     )
 
-    # Patient app only sees available slots
-    # Dashboard sees everything — available, booked, blocked
     if not dashboard:
         query = query.filter(Slot.status == "available")
 
