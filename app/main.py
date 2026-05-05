@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.api.routes import auth, doctors, bookings, patients, webhooks, triage, slots, documents, copilot
 from app.api.routes import waiting_room
 from app.api.routes import nearby
+from app.api.routes import notifications
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -32,6 +33,7 @@ app.include_router(slots.router, prefix="/api/v1")
 app.include_router(documents.router, prefix="/api/v1")
 app.include_router(copilot.router, prefix="/api/v1")
 app.include_router(waiting_room.router, prefix="/api/v1")
+app.include_router(notifications.router, prefix="/api/v1")
 
 @app.get("/")
 def root():

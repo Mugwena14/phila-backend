@@ -27,6 +27,11 @@ from app.tasks.whatsapp_tasks import (
     send_followup_whatsapp,
     check_intake_completion,
 )
+from app.tasks.notification_tasks import (       # ← new
+    notify_booking_confirmed,
+    notify_booking_cancelled,
+    notify_patient_checkin,
+)
 from app.core.security import decode_token
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import text
@@ -101,10 +106,14 @@ def create_booking(
     db.commit()
     db.refresh(booking)
 
-    # ── WEEK 4 AGENT TASKS ──────────────────────────────────────────
-
     booking_id = str(booking.id)
     appt_datetime = datetime.combine(slot.date, slot.start_time)
+
+    # ── Notifications ────────────────────────────────────────────────
+    notify_booking_confirmed(booking_id, db)     # ← patient + doctor
+    # ─────────────────────────────────────────────────────────────────
+
+    # ── WEEK 4 AGENT TASKS ──────────────────────────────────────────
 
     # 1. Intake agent — fires 10 seconds after booking
     send_intake_whatsapp.apply_async(
@@ -121,7 +130,6 @@ def create_booking(
     logger.info(f"Intake completion check queued for booking {booking_id}")
 
     # 3. No-show prevention — reminder ladder based on risk score
-
     remind_24hr = appt_datetime - timedelta(hours=24)
     if remind_24hr > datetime.now():
         send_appointment_reminder.apply_async(
@@ -175,34 +183,20 @@ def create_walk_in_booking(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Create a booking for a walk-in patient.
-    If patient phone exists as real account → use it.
-    If phone exists as WALKIN_ record → reuse it.
-    Otherwise → create new WALKIN_ record.
-    """
-    # Find doctor
-    doctor = db.query(Doctor).filter(
-        Doctor.user_id == current_user.id
-    ).first()
+    doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor profile not found")
 
-    # Check for existing real account first
     patient = db.query(User).filter(
         User.phone == data.patient_phone,
         User.is_walk_in == False,
     ).first()
 
     if not patient:
-        # Check for existing walk-in record
         walkin_phone = f"WALKIN_{data.patient_phone}"
-        patient = db.query(User).filter(
-            User.phone == walkin_phone,
-        ).first()
+        patient = db.query(User).filter(User.phone == walkin_phone).first()
 
     if not patient:
-        # Create new walk-in patient
         claim_code = "PHILA-" + "".join(
             random.choices(string.ascii_uppercase + string.digits, k=4)
         )
@@ -221,7 +215,6 @@ def create_walk_in_booking(
         db.flush()
         logger.info(f"Walk-in patient created: {patient.full_name} — claim code: {claim_code}")
 
-    # Get slot if provided
     slot = None
     if data.slot_id:
         slot = db.query(Slot).filter(Slot.id == data.slot_id).first()
@@ -229,7 +222,6 @@ def create_walk_in_booking(
             raise HTTPException(status_code=400, detail="Slot not available")
         slot.status = "booked"
 
-    # Create booking
     booking = Booking(
         patient_id=patient.id,
         doctor_id=doctor.id,
@@ -243,6 +235,9 @@ def create_walk_in_booking(
     db.add(booking)
     db.commit()
     db.refresh(booking)
+
+    # Notify doctor of walk-in
+    notify_booking_confirmed(str(booking.id), db)   # ← new
 
     logger.info(f"Walk-in booking created: {booking.id} for {patient.full_name}")
 
@@ -272,7 +267,6 @@ def update_booking_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Update booking status — arrived, in_consultation, completed, no_show."""
     booking = db.query(Booking).filter(Booking.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
@@ -282,6 +276,7 @@ def update_booking_status(
 
         if data.status == "arrived":
             booking.arrived_at = datetime.now()
+            notify_patient_checkin(str(booking_id), db)   # ← new
             logger.info(f"Booking {booking_id} — patient arrived")
 
         elif data.status == "completed":
@@ -289,10 +284,8 @@ def update_booking_status(
             logger.info(f"Booking {booking_id} — consultation completed")
 
         elif data.status == "no_show":
-            # Bump risk score
             current = int(booking.risk_score or "0")
             booking.risk_score = str(min(current + 25, 100))
-            # Release slot
             slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
             if slot:
                 slot.status = "available"
@@ -314,7 +307,6 @@ def move_booking(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Move booking to a different slot. Old slot released automatically."""
     booking = db.query(Booking).filter(Booking.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
@@ -323,12 +315,10 @@ def move_booking(
     if not new_slot or new_slot.status != "available":
         raise HTTPException(status_code=400, detail="New slot not available")
 
-    # Release old slot
     old_slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
     if old_slot:
         old_slot.status = "available"
 
-    # Assign new slot
     new_slot.status = "booked"
     booking.slot_id = new_slot.id
     db.commit()
@@ -488,6 +478,9 @@ def cancel_booking(
 
     db.commit()
 
+    # Notify doctor of cancellation         # ← new
+    notify_booking_cancelled(str(booking_id), cancelled_by="patient", db=db)
+
     waiting = (
         db.query(Waitlist)
         .filter(
@@ -503,9 +496,7 @@ def cancel_booking(
         waiting.status = "notified"
         db.commit()
 
-        waiting_user = db.query(User).filter(
-            User.id == waiting.patient_id
-        ).first()
+        waiting_user = db.query(User).filter(User.id == waiting.patient_id).first()
         if waiting_user and slot:
             send_whatsapp_message(
                 waiting_user.phone,

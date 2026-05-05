@@ -9,11 +9,9 @@ celery_app = Celery(
     include=[
         "app.tasks.whatsapp_tasks",
         "app.tasks.health_tasks",
+        "app.tasks.notification_tasks",  # ← new
     ],
 )
-
-
-
 
 celery_app.conf.update(
     task_serializer="json",
@@ -35,6 +33,21 @@ celery_app.conf.update(
         "daily-prescription-check": {
             "task": "app.tasks.health_tasks.run_prescription_refill_check",
             "schedule": crontab(hour=9, minute=0),
+        },
+        # No-show check — every 15 minutes
+        "check-no-shows": {
+            "task": "app.tasks.notification_tasks.check_no_shows",
+            "schedule": 900,
+        },
+        # Daily summary to doctors — every day at 20:00 SAST
+        "daily-summary": {
+            "task": "app.tasks.notification_tasks.send_daily_summary",
+            "schedule": crontab(hour=20, minute=0),
+        },
+        # Slots low check — every day at 08:00 SAST
+        "check-slots-low": {
+            "task": "app.tasks.notification_tasks.check_slots_low",
+            "schedule": crontab(hour=8, minute=0),
         },
     },
 )
