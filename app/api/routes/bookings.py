@@ -109,11 +109,6 @@ def create_booking(
     booking_id = str(booking.id)
     appt_datetime = datetime.combine(slot.date, slot.start_time)
 
-    # ── Notifications ────────────────────────────────────────────────
-    notify_booking_confirmed(booking_id, db)     # ← patient + doctor
-    # ─────────────────────────────────────────────────────────────────
-
-    # ── WEEK 4 AGENT TASKS ──────────────────────────────────────────
 
     # 1. Intake agent — fires 10 seconds after booking
     send_intake_whatsapp.apply_async(
@@ -281,6 +276,12 @@ def update_booking_status(
 
         elif data.status == "completed":
             booking.completed_at = datetime.now()
+            # Fire rating request 2 hours after completion
+            from app.tasks.whatsapp_tasks import send_rating_request_whatsapp
+            send_rating_request_whatsapp.apply_async(
+                args=[str(booking_id)],
+                countdown=7200,
+            )
             logger.info(f"Booking {booking_id} — consultation completed")
 
         elif data.status == "no_show":
@@ -509,6 +510,52 @@ def cancel_booking(
             )
 
     return {"message": "Booking cancelled successfully", "slot_released": True}
+
+@router.get("/{booking_id}/queue-position")
+def get_queue_position(
+    booking_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from datetime import date as date_type
+
+    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if str(booking.patient_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not your booking")
+
+    slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
+    if not slot or slot.date != date_type.today():
+        return {"position": None, "total": None, "estimated_wait_minutes": None, "is_today": False}
+
+    all_today = (
+        db.query(Booking)
+        .join(Slot, Slot.id == Booking.slot_id)
+        .filter(
+            Booking.doctor_id == booking.doctor_id,
+            Slot.date == date_type.today(),
+            Booking.status.in_(["confirmed", "arrived", "in_consultation"]),
+        )
+        .order_by(Slot.start_time)
+        .all()
+    )
+
+    position = next(
+        (i + 1 for i, b in enumerate(all_today) if str(b.id) == str(booking_id)),
+        None
+    )
+
+    doctor = db.query(Doctor).filter(Doctor.id == booking.doctor_id).first()
+    slot_duration = doctor.slot_duration_minutes if doctor else 20
+    estimated_wait = (position - 1) * slot_duration if position else None
+
+    return {
+        "position": position,
+        "total": len(all_today),
+        "estimated_wait_minutes": estimated_wait,
+        "is_today": True,
+    }
 
 
 @router.post("/waitlist", response_model=WaitlistResponse, status_code=201)

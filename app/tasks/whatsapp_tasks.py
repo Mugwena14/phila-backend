@@ -264,3 +264,58 @@ def check_intake_completion(self, booking_id: str):
         logger.error(f"Error in check_intake_completion: {e}")
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, max_retries=2)
+def send_rating_request_whatsapp(self, booking_id: str):
+    """Fires after appointment is completed. Asks patient to rate."""
+    db = SessionLocal()
+    try:
+        booking = db.query(Booking).filter(Booking.id == booking_id).first()
+        if not booking:
+            return
+
+        patient = db.query(User).filter(User.id == booking.patient_id).first()
+        doctor  = db.query(Doctor).filter(Doctor.id == booking.doctor_id).first()
+
+        if not all([patient, doctor]):
+            return
+
+        import redis, json
+        from app.core.config import settings as app_settings
+        r = redis.from_url(app_settings.REDIS_URL, decode_responses=True)
+        r.setex(
+            f"rating:{patient.phone}",
+            86400,
+            json.dumps({
+                "booking_id": booking_id,
+                "doctor_id": str(doctor.id),
+                "patient_id": str(patient.id),
+                "doctor_name": doctor.practice_name,
+            })
+        )
+
+        first_name = patient.full_name.split()[0]
+        message = (
+            f"Hi {first_name}! 🌟\n\n"
+            f"How was your visit with *{doctor.practice_name}*?\n\n"
+            f"Reply with a number to rate your experience:\n"
+            f"*1* ⭐ Poor\n"
+            f"*2* ⭐⭐ Fair\n"
+            f"*3* ⭐⭐⭐ Good\n"
+            f"*4* ⭐⭐⭐⭐ Very good\n"
+            f"*5* ⭐⭐⭐⭐⭐ Excellent\n\n"
+            f"Your rating helps other patients find great doctors. 💙"
+        )
+
+        success = send_whatsapp_message(patient.phone, message)
+        if not success:
+            raise self.retry(countdown=300)
+
+        logger.info(f"Rating request sent for booking {booking_id}")
+
+    except Exception as e:
+        logger.error(f"Error sending rating request: {e}")
+        raise self.retry(exc=e, countdown=300)
+    finally:
+        db.close()
