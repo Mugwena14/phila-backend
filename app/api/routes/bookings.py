@@ -167,6 +167,10 @@ def create_booking(
     )
     logger.info(f"Follow-up task queued for booking {booking_id} at {followup_time}")
 
+    # 5. Notify patient and doctor of confirmed booking  ← ADD THIS
+    notify_booking_confirmed(booking_id, db)
+    logger.info(f"Booking confirmed notification sent for {booking_id}")
+
     # ────────────────────────────────────────────────────────────────
 
     return booking
