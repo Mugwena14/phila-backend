@@ -27,7 +27,7 @@ from app.tasks.whatsapp_tasks import (
     send_followup_whatsapp,
     check_intake_completion,
 )
-from app.tasks.notification_tasks import (       # ← new
+from app.tasks.notification_tasks import (
     notify_booking_confirmed,
     notify_booking_cancelled,
     notify_patient_checkin,
