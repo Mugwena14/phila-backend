@@ -234,6 +234,8 @@ def create_walk_in_booking(
         latitude=doctor.latitude,
         longitude=doctor.longitude,
         address=doctor.address,
+        city=doctor.city if doctor else None,
+        province=doctor.province if doctor else None,
     )
 
 

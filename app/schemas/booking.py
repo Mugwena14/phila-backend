@@ -51,6 +51,8 @@ class BookingDetailResponse(BookingResponse):
     latitude: Optional[float] = None                 # ← new (from doctor)
     longitude: Optional[float] = None                # ← new (from doctor)
     address: Optional[str] = None                    # ← new (from doctor, optional fallback)
+    city: Optional[str] = None
+    province: Optional[str] = None
 
 class WaitlistCreate(BaseModel):
     doctor_id: UUID
