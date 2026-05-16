@@ -18,6 +18,8 @@ class DoctorCreate(BaseModel):
     address: str
     city: str
     province: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     consultation_fee: float
     slot_duration_minutes: int = 20
     medical_aids: List[str] = []
@@ -35,6 +37,8 @@ class DoctorResponse(BaseModel):
     address: str
     city: str
     province: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     consultation_fee: float
     slot_duration_minutes: int
     medical_aids: List[str]

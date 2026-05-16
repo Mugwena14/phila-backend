@@ -23,8 +23,8 @@ class Doctor(Base):
     address = Column(String, nullable=False)
     city = Column(String, nullable=False)
     province = Column(String, nullable=False)
-    latitude = Column(Float, nullable=True)   # ← new
-    longitude = Column(Float, nullable=True)  # ← new
+    latitude = Column(Float, nullable=True)   
+    longitude = Column(Float, nullable=True)  
 
     # Settings
     consultation_fee = Column(Float, nullable=False, default=0.0)
