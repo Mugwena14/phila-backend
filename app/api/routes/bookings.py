@@ -109,69 +109,45 @@ def create_booking(
     booking_id = str(booking.id)
     appt_datetime = datetime.combine(slot.date, slot.start_time)
 
-
     # 1. Intake agent — fires 10 seconds after booking
-    send_intake_whatsapp.apply_async(
-        args=[booking_id],
-        countdown=10,
-    )
+    send_intake_whatsapp.apply_async(args=[booking_id], countdown=10)
     logger.info(f"Intake task queued for booking {booking_id}")
 
     # 2. Intake completion check — fires 30 minutes later
-    check_intake_completion.apply_async(
-        args=[booking_id],
-        countdown=1800,
-    )
+    check_intake_completion.apply_async(args=[booking_id], countdown=1800)
     logger.info(f"Intake completion check queued for booking {booking_id}")
 
     # 3. No-show prevention — reminder ladder based on risk score
     remind_24hr = appt_datetime - timedelta(hours=24)
     if remind_24hr > datetime.now():
-        send_appointment_reminder.apply_async(
-            args=[booking_id, 24],
-            eta=remind_24hr,
-        )
+        send_appointment_reminder.apply_async(args=[booking_id, 24], eta=remind_24hr)
         logger.info(f"24hr reminder queued for booking {booking_id}")
 
     remind_2hr = appt_datetime - timedelta(hours=2)
     if remind_2hr > datetime.now():
-        send_appointment_reminder.apply_async(
-            args=[booking_id, 2],
-            eta=remind_2hr,
-        )
+        send_appointment_reminder.apply_async(args=[booking_id, 2], eta=remind_2hr)
         logger.info(f"2hr reminder queued for booking {booking_id}")
 
     if risk >= 30:
         remind_48hr = appt_datetime - timedelta(hours=48)
         if remind_48hr > datetime.now():
-            send_appointment_reminder.apply_async(
-                args=[booking_id, 48],
-                eta=remind_48hr,
-            )
+            send_appointment_reminder.apply_async(args=[booking_id, 48], eta=remind_48hr)
             logger.info(f"48hr reminder queued for booking {booking_id} (risk: {risk})")
 
     if risk >= 65:
         remind_72hr = appt_datetime - timedelta(hours=72)
         if remind_72hr > datetime.now():
-            send_appointment_reminder.apply_async(
-                args=[booking_id, 72],
-                eta=remind_72hr,
-            )
+            send_appointment_reminder.apply_async(args=[booking_id, 72], eta=remind_72hr)
             logger.info(f"72hr reminder queued for booking {booking_id} (risk: {risk})")
 
     # 4. Follow-up agent — fires 3 days after appointment
     followup_time = appt_datetime + timedelta(days=3)
-    send_followup_whatsapp.apply_async(
-        args=[booking_id],
-        eta=followup_time,
-    )
+    send_followup_whatsapp.apply_async(args=[booking_id], eta=followup_time)
     logger.info(f"Follow-up task queued for booking {booking_id} at {followup_time}")
 
-    # 5. Notify patient and doctor of confirmed booking  ← ADD THIS
+    # 5. Notify patient and doctor of confirmed booking
     notify_booking_confirmed(booking_id, db)
     logger.info(f"Booking confirmed notification sent for {booking_id}")
-
-    # ────────────────────────────────────────────────────────────────
 
     return booking
 
@@ -235,9 +211,7 @@ def create_walk_in_booking(
     db.commit()
     db.refresh(booking)
 
-    # Notify doctor of walk-in
-    notify_booking_confirmed(str(booking.id), db)   # ← new
-
+    notify_booking_confirmed(str(booking.id), db)
     logger.info(f"Walk-in booking created: {booking.id} for {patient.full_name}")
 
     return BookingDetailResponse(
@@ -254,8 +228,12 @@ def create_walk_in_booking(
         slot_date=str(slot.date) if slot else None,
         slot_start_time=str(slot.start_time) if slot else None,
         slot_end_time=str(slot.end_time) if slot else None,
+        slot_duration_minutes=doctor.slot_duration_minutes,
         practice_name=doctor.practice_name,
         specialty=doctor.specialty,
+        latitude=doctor.latitude,
+        longitude=doctor.longitude,
+        address=doctor.address,
     )
 
 
@@ -275,12 +253,11 @@ def update_booking_status(
 
         if data.status == "arrived":
             booking.arrived_at = datetime.now()
-            notify_patient_checkin(str(booking_id), db)   # ← new
+            notify_patient_checkin(str(booking_id), db)
             logger.info(f"Booking {booking_id} — patient arrived")
 
         elif data.status == "completed":
             booking.completed_at = datetime.now()
-            # Fire rating request 2 hours after completion
             from app.tasks.whatsapp_tasks import send_rating_request_whatsapp
             send_rating_request_whatsapp.apply_async(
                 args=[str(booking_id)],
@@ -376,8 +353,12 @@ def get_my_bookings(
                 slot_date=str(slot.date) if slot else None,
                 slot_start_time=str(slot.start_time) if slot else None,
                 slot_end_time=str(slot.end_time) if slot else None,
+                slot_duration_minutes=doctor.slot_duration_minutes if doctor else None,
                 practice_name=doctor.practice_name if doctor else None,
                 specialty=doctor.specialty if doctor else None,
+                latitude=doctor.latitude if doctor else None,
+                longitude=doctor.longitude if doctor else None,
+                address=doctor.address if doctor else None,
             )
         )
     return result
@@ -451,9 +432,13 @@ def get_practice_bookings(
                 slot_date=str(slot.date) if slot else None,
                 slot_start_time=str(slot.start_time) if slot else None,
                 slot_end_time=str(slot.end_time) if slot else None,
+                slot_duration_minutes=doctor.slot_duration_minutes,
                 doctor_name=patient.full_name if patient else None,
                 practice_name=doctor.practice_name,
                 specialty=doctor.specialty,
+                latitude=doctor.latitude,
+                longitude=doctor.longitude,
+                address=doctor.address,
             )
         )
     return result
@@ -483,7 +468,6 @@ def cancel_booking(
 
     db.commit()
 
-    # Notify doctor of cancellation         # ← new
     notify_booking_cancelled(str(booking_id), cancelled_by="patient", db=db)
 
     waiting = (
@@ -514,6 +498,7 @@ def cancel_booking(
             )
 
     return {"message": "Booking cancelled successfully", "slot_released": True}
+
 
 @router.get("/{booking_id}/queue-position")
 def get_queue_position(

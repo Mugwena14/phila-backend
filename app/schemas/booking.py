@@ -42,11 +42,15 @@ class BookingDetailResponse(BookingResponse):
     slot_date: Optional[str] = None
     slot_start_time: Optional[str] = None
     slot_end_time: Optional[str] = None
+    slot_duration_minutes: Optional[int] = None     # ← new
     doctor_name: Optional[str] = None
     practice_name: Optional[str] = None
     specialty: Optional[str] = None
     intake_status: Optional[str] = None
     intake_brief: Optional[Any] = None
+    latitude: Optional[float] = None                 # ← new (from doctor)
+    longitude: Optional[float] = None                # ← new (from doctor)
+    address: Optional[str] = None                    # ← new (from doctor, optional fallback)
 
 class WaitlistCreate(BaseModel):
     doctor_id: UUID
