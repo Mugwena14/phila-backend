@@ -3,11 +3,23 @@ from uuid import UUID
 from datetime import datetime
 from typing import Optional, List
 
+
 class WorkingHoursInput(BaseModel):
     day_of_week: int
     is_active: bool = True
     start_time: str
     end_time: str
+
+
+class WorkingHoursOut(BaseModel):
+    day_of_week: int
+    is_active: bool
+    start_time: str
+    end_time: str
+
+    class Config:
+        from_attributes = True
+
 
 class DoctorCreate(BaseModel):
     specialty: str
@@ -25,6 +37,7 @@ class DoctorCreate(BaseModel):
     medical_aids: List[str] = []
     languages: List[str] = ["English"]
     working_hours: List[WorkingHoursInput] = []
+
 
 class DoctorResponse(BaseModel):
     id: UUID
@@ -49,9 +62,11 @@ class DoctorResponse(BaseModel):
     total_reviews: Optional[int] = 0
     created_at: datetime
     practice_images: Optional[List[str]] = []
+    working_hours: List[WorkingHoursOut] = []
 
     class Config:
         from_attributes = True
+
 
 class SlotResponse(BaseModel):
     id: UUID
@@ -64,6 +79,7 @@ class SlotResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
 
 class DoctorWithSlotsResponse(DoctorResponse):
     slots: List[SlotResponse] = []

@@ -49,3 +49,4 @@ class Doctor(Base):
     
     practice_images = Column(ARRAY(String), default=[], nullable=True)
 
+    working_hours = relationship("WorkingHours", lazy="select")
