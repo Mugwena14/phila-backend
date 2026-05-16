@@ -1,6 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, time
 from typing import Optional, List
 
 
@@ -14,8 +14,12 @@ class WorkingHoursInput(BaseModel):
 class WorkingHoursOut(BaseModel):
     day_of_week: int
     is_active: bool
-    start_time: str
-    end_time: str
+    start_time: time
+    end_time: time
+
+    @field_serializer('start_time', 'end_time')
+    def serialize_time(self, t: time) -> str:
+        return t.strftime('%H:%M:%S')
 
     class Config:
         from_attributes = True
