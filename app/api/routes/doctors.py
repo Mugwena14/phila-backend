@@ -17,12 +17,12 @@ from app.schemas.doctor import (
 )
 from app.services.slot_service import generate_slots_for_week
 from app.core.security import decode_token
-from app.utils.geocoding import geocode_address         
+from app.utils.geocoding import geocode_address
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import File, UploadFile
 
 import cloudinary
 import cloudinary.uploader
-from fastapi import File, UploadFile
 from app.core.config import settings as app_settings
 
 # Init Cloudinary
@@ -51,7 +51,7 @@ def get_current_user(
 
 
 @router.post("/register", response_model=DoctorResponse, status_code=201)
-async def register_doctor(                               # ← async now
+async def register_doctor(
     data: DoctorCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -76,11 +76,9 @@ async def register_doctor(                               # ← async now
         languages=data.languages,
     )
 
-    # ── Geocode the practice address ──────────────────────────────────────────
     coords = await geocode_address(data.address, data.city, data.province)
     if coords:
         doctor.latitude, doctor.longitude = coords
-    # ─────────────────────────────────────────────────────────────────────────
 
     db.add(doctor)
     db.flush()
@@ -213,12 +211,13 @@ def get_doctor_slots(
         for s in slots
     ]
 
-    @router.post("/upload-image")
-    async def upload_practice_image(
-        file: UploadFile = File(...),
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user),
-    ):
+
+@router.post("/upload-image")
+async def upload_practice_image(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor profile not found")
@@ -227,7 +226,6 @@ def get_doctor_slots(
     if len(current_images) >= 4:
         raise HTTPException(status_code=400, detail="Maximum 4 images allowed")
 
-    # Validate file type
     if file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
         raise HTTPException(status_code=400, detail="Only JPEG, PNG and WebP images are allowed")
 
@@ -265,16 +263,13 @@ async def remove_practice_image(
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor profile not found")
 
-    # Extract public_id from Cloudinary URL and delete
     try:
-        # URL format: https://res.cloudinary.com/cloud/image/upload/v123/phila/practices/uuid/filename.ext
         parts = image_url.split("/upload/")
         if len(parts) == 2:
-            public_id = parts[1].split("/", 1)[-1].rsplit(".", 1)[0]
-            public_id = parts[1].rsplit(".", 1)[0]  # remove extension
+            public_id = parts[1].rsplit(".", 1)[0]
             cloudinary.uploader.destroy(public_id)
     except Exception:
-        pass  # Still remove from DB even if Cloudinary delete fails
+        pass
 
     from sqlalchemy import text
     db.execute(
@@ -282,6 +277,6 @@ async def remove_practice_image(
         {"url": image_url, "id": str(doctor.id)}
     )
     db.commit()
-
     db.refresh(doctor)
+
     return {"success": True, "practice_images": doctor.practice_images}
