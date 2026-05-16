@@ -23,8 +23,8 @@ class Doctor(Base):
     address = Column(String, nullable=False)
     city = Column(String, nullable=False)
     province = Column(String, nullable=False)
-    latitude = Column(Float, nullable=True)   
-    longitude = Column(Float, nullable=True)  
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
 
     # Settings
     consultation_fee = Column(Float, nullable=False, default=0.0)
@@ -40,13 +40,13 @@ class Doctor(Base):
     # Languages spoken
     languages = Column(ARRAY(String), default=["English"])
 
+    # Practice images — Cloudinary URLs
+    practice_images = Column(ARRAY(String), default=[], nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Relationships
     user = relationship("User", backref="doctor_profile")
     slots = relationship("Slot", back_populates="doctor", cascade="all, delete-orphan")
-    
-    practice_images = Column(ARRAY(String), default=[], nullable=True)
-
-    working_hours = relationship("WorkingHours", lazy="select")
+    working_hours = relationship("WorkingHours", back_populates="doctor", lazy="select")

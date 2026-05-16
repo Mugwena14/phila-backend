@@ -18,4 +18,4 @@ class WorkingHours(Base):
     end_time = Column(Time, nullable=False)
 
     # Relationships
-    doctor = relationship("Doctor", backref="working_hours")
+    doctor = relationship("Doctor", back_populates="working_hours")
