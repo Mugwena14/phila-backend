@@ -48,6 +48,7 @@ class DoctorResponse(BaseModel):
     rating: Optional[float] = 0.0
     total_reviews: Optional[int] = 0
     created_at: datetime
+    practice_images: Optional[List[str]] = []
 
     class Config:
         from_attributes = True

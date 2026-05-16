@@ -46,3 +46,6 @@ class Doctor(Base):
     # Relationships
     user = relationship("User", backref="doctor_profile")
     slots = relationship("Slot", back_populates="doctor", cascade="all, delete-orphan")
+    
+    practice_images = Column(ARRAY(String), default=[], nullable=True)
+

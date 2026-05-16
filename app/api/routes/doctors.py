@@ -17,8 +17,20 @@ from app.schemas.doctor import (
 )
 from app.services.slot_service import generate_slots_for_week
 from app.core.security import decode_token
-from app.utils.geocoding import geocode_address          # ← new
+from app.utils.geocoding import geocode_address         
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+import cloudinary
+import cloudinary.uploader
+from fastapi import File, UploadFile
+from app.core.config import settings as app_settings
+
+# Init Cloudinary
+cloudinary.config(
+    cloud_name=app_settings.CLOUDINARY_CLOUD_NAME,
+    api_key=app_settings.CLOUDINARY_API_KEY,
+    api_secret=app_settings.CLOUDINARY_API_SECRET,
+)
 
 router = APIRouter(prefix="/doctors", tags=["doctors"])
 security = HTTPBearer()
@@ -200,3 +212,76 @@ def get_doctor_slots(
         )
         for s in slots
     ]
+
+    @router.post("/upload-image")
+    async def upload_practice_image(
+        file: UploadFile = File(...),
+        db: Session = Depends(get_db),
+        current_user: User = Depends(get_current_user),
+    ):
+    doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+    current_images = doctor.practice_images or []
+    if len(current_images) >= 4:
+        raise HTTPException(status_code=400, detail="Maximum 4 images allowed")
+
+    # Validate file type
+    if file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
+        raise HTTPException(status_code=400, detail="Only JPEG, PNG and WebP images are allowed")
+
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder=f"phila/practices/{doctor.id}",
+            transformation=[
+                {"width": 1200, "height": 800, "crop": "fill", "quality": "auto", "fetch_format": "auto"}
+            ]
+        )
+        url = result["secure_url"]
+        public_id = result["public_id"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
+
+    from sqlalchemy import text
+    db.execute(
+        text("UPDATE doctors SET practice_images = array_append(COALESCE(practice_images, ARRAY[]::text[]), :url) WHERE id = :id"),
+        {"url": url, "id": str(doctor.id)}
+    )
+    db.commit()
+    db.refresh(doctor)
+
+    return {"url": url, "public_id": public_id, "practice_images": doctor.practice_images}
+
+
+@router.delete("/remove-image")
+async def remove_practice_image(
+    image_url: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+    # Extract public_id from Cloudinary URL and delete
+    try:
+        # URL format: https://res.cloudinary.com/cloud/image/upload/v123/phila/practices/uuid/filename.ext
+        parts = image_url.split("/upload/")
+        if len(parts) == 2:
+            public_id = parts[1].split("/", 1)[-1].rsplit(".", 1)[0]
+            public_id = parts[1].rsplit(".", 1)[0]  # remove extension
+            cloudinary.uploader.destroy(public_id)
+    except Exception:
+        pass  # Still remove from DB even if Cloudinary delete fails
+
+    from sqlalchemy import text
+    db.execute(
+        text("UPDATE doctors SET practice_images = array_remove(practice_images, :url) WHERE id = :id"),
+        {"url": image_url, "id": str(doctor.id)}
+    )
+    db.commit()
+
+    db.refresh(doctor)
+    return {"success": True, "practice_images": doctor.practice_images}
