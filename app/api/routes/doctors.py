@@ -27,7 +27,6 @@ from app.core.config import settings as app_settings
 
 # Init Cloudinary
 cloudinary.config(
-    cloud_name=app_settings.CLOUDINARY_CLOUD_NAME,
     api_key=app_settings.CLOUDINARY_API_KEY,
     api_secret=app_settings.CLOUDINARY_API_SECRET,
 )
