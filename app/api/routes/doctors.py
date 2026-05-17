@@ -230,20 +230,20 @@ async def upload_practice_image(
         raise HTTPException(status_code=400, detail="Only JPEG, PNG and WebP images are allowed")
 
     try:
-            contents = await file.read()
-            result = cloudinary.uploader.upload(
-                contents,
-                folder=f"phila/practices/{doctor.id}",
-                transformation=[
-                    {"width": 1200, "height": 800, "crop": "fill", "quality": "auto", "fetch_format": "auto"}
-                ]
-            )
-            url = result["secure_url"]
-            public_id = result["public_id"]
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
+        contents = await file.read()
+        result = cloudinary.uploader.upload(
+            contents,
+            folder=f"phila/practices/{doctor.id}",
+            transformation=[
+                {"width": 1200, "height": 800, "crop": "fill", "quality": "auto", "fetch_format": "auto"}
+            ]
+        )
+        url = result["secure_url"]
+        public_id = result["public_id"]
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Image upload failed: {str(e)}")
 
     from sqlalchemy import text
     db.execute(
