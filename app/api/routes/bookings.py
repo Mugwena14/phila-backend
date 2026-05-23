@@ -243,7 +243,6 @@ def create_walk_in_booking(
         province=doctor.province if doctor else None,
     )
 
-
 @router.patch("/{booking_id}/status", status_code=200)
 def update_booking_status(
     booking_id: UUID,
@@ -263,19 +262,18 @@ def update_booking_status(
             notify_patient_checkin(str(booking_id), db)
             logger.info(f"Booking {booking_id} — patient arrived")
 
-            elif data.status == "completed":
-                booking.completed_at = datetime.now()
-                # Release the slot so it can be reused for walk-ins
-                slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
-                if slot:
-                    slot.status = "available"
-                booking.slot_id = None
-                from app.tasks.whatsapp_tasks import send_rating_request_whatsapp
-                send_rating_request_whatsapp.apply_async(
-                    args=[str(booking_id)],
-                    countdown=7200,
-                )
-                logger.info(f"Booking {booking_id} — consultation completed, slot released")
+        elif data.status == "completed":
+            booking.completed_at = datetime.now()
+            slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
+            if slot:
+                slot.status = "available"
+            booking.slot_id = None
+            from app.tasks.whatsapp_tasks import send_rating_request_whatsapp
+            send_rating_request_whatsapp.apply_async(
+                args=[str(booking_id)],
+                countdown=7200,
+            )
+            logger.info(f"Booking {booking_id} — consultation completed, slot released")
 
         elif data.status == "no_show":
             current = int(booking.risk_score or "0")
