@@ -269,6 +269,7 @@ def update_booking_status(
                 slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
                 if slot:
                     slot.status = "available"
+                booking.slot_id = None
                 from app.tasks.whatsapp_tasks import send_rating_request_whatsapp
                 send_rating_request_whatsapp.apply_async(
                     args=[str(booking_id)],
