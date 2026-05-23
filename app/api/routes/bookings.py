@@ -193,8 +193,10 @@ def create_walk_in_booking(
     slot = None
     if data.slot_id:
         slot = db.query(Slot).filter(Slot.id == data.slot_id).first()
-        if not slot or slot.status != "available":
-            raise HTTPException(status_code=400, detail="Slot not available")
+        if not slot:
+            raise HTTPException(status_code=404, detail="Slot not found")
+        if slot.status == "booked":
+            raise HTTPException(status_code=400, detail="Slot is already booked")
         slot.status = "booked"
 
     booking = Booking(
@@ -211,7 +213,10 @@ def create_walk_in_booking(
     db.commit()
     db.refresh(booking)
 
-    notify_booking_confirmed(str(booking.id), db)
+    try:
+        notify_booking_confirmed(str(booking.id), db)
+    except Exception as e:
+        logger.warning(f"Walk-in notification failed (non-fatal): {e}")
     logger.info(f"Walk-in booking created: {booking.id} for {patient.full_name}")
 
     return BookingDetailResponse(
@@ -258,14 +263,18 @@ def update_booking_status(
             notify_patient_checkin(str(booking_id), db)
             logger.info(f"Booking {booking_id} — patient arrived")
 
-        elif data.status == "completed":
-            booking.completed_at = datetime.now()
-            from app.tasks.whatsapp_tasks import send_rating_request_whatsapp
-            send_rating_request_whatsapp.apply_async(
-                args=[str(booking_id)],
-                countdown=7200,
-            )
-            logger.info(f"Booking {booking_id} — consultation completed")
+            elif data.status == "completed":
+                booking.completed_at = datetime.now()
+                # Release the slot so it can be reused for walk-ins
+                slot = db.query(Slot).filter(Slot.id == booking.slot_id).first()
+                if slot:
+                    slot.status = "available"
+                from app.tasks.whatsapp_tasks import send_rating_request_whatsapp
+                send_rating_request_whatsapp.apply_async(
+                    args=[str(booking_id)],
+                    countdown=7200,
+                )
+                logger.info(f"Booking {booking_id} — consultation completed, slot released")
 
         elif data.status == "no_show":
             current = int(booking.risk_score or "0")

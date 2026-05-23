@@ -10,7 +10,7 @@ from app.api.routes import ratings
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Private doctor booking platform for South Africa",
+    description="Health Superpower platform for South Africa",
     version="0.1.0",
     docs_url="/docs",
 )
@@ -24,7 +24,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/api/v1")
-app.include_router(nearby.router, prefix="/api/v1", tags=["nearby"])  # ← moved up, before doctors
+app.include_router(nearby.router, prefix="/api/v1", tags=["nearby"]) 
 app.include_router(doctors.router, prefix="/api/v1")
 app.include_router(bookings.router, prefix="/api/v1")
 app.include_router(patients.router, prefix="/api/v1")
