@@ -1,3 +1,6 @@
+Write-Host "Phase 6 - AI Week Builder backend (mode toggle on existing endpoint)" -ForegroundColor Cyan
+
+Set-Content "app/routers/ai_day_builder.py" @'
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict
@@ -124,3 +127,9 @@ async def parse_day(payload: ParseDayRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI parsing failed: {str(e)}")
+'@
+Write-Host "  Updated app/routers/ai_day_builder.py - mode toggle added" -ForegroundColor Green
+
+git add .
+git commit -m "Phase 6 - AI Week Builder backend: mode toggle generates templates + week assignments"
+Write-Host "Backend script complete and committed!" -ForegroundColor Green
