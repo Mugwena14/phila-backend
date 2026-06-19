@@ -1,3 +1,6 @@
+Write-Host "Phase 7 - Voice input backend (transcription endpoint)" -ForegroundColor Cyan
+
+Set-Content "app/routers/ai_day_builder.py" @'
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict
@@ -153,3 +156,22 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+'@
+Write-Host "  Updated app/routers/ai_day_builder.py - transcribe endpoint added" -ForegroundColor Green
+
+Write-Host ""
+Write-Host "MANUAL STEPS REQUIRED:" -ForegroundColor Yellow
+Write-Host "1. Install new dependencies:" -ForegroundColor Yellow
+Write-Host "   pip install openai python-multipart" -ForegroundColor White
+Write-Host ""
+Write-Host "2. Set a new environment variable (separate from ANTHROPIC_API_KEY):" -ForegroundColor Yellow
+Write-Host "   OPENAI_API_KEY=sk-..." -ForegroundColor White
+Write-Host "   Get one at https://platform.openai.com/api-keys" -ForegroundColor White
+Write-Host "   Whisper transcription is cheap - about \$0.006 per minute of audio." -ForegroundColor White
+Write-Host ""
+Write-Host "No main.py changes needed - this reuses the same router from Phase 5." -ForegroundColor Yellow
+Write-Host ""
+
+git add .
+git commit -m "Phase 7 - Voice input backend: Whisper transcription endpoint"
+Write-Host "Backend script complete and committed!" -ForegroundColor Green
