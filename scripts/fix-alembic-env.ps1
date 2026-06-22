@@ -1,3 +1,6 @@
+Write-Host "Phila Backend - Fix alembic env.py DATABASE_URL loading" -ForegroundColor Cyan
+
+Set-Content "alembic/env.py" @'
 import os
 import sys
 from logging.config import fileConfig
@@ -64,3 +67,9 @@ if context.is_offline_mode():
         context.run_migrations()
 else:
     run_migrations_online()
+'@
+Write-Host "  Updated alembic/env.py - now loads .env directly, exception no longer silently swallowed" -ForegroundColor Green
+
+git add .
+git commit -m "Fix alembic env.py - explicitly load .env, stop silently swallowing the Base import exception"
+Write-Host "Done and committed!" -ForegroundColor Green
