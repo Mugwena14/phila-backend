@@ -25,6 +25,11 @@ class WorkingHoursOut(BaseModel):
         from_attributes = True
 
 
+class DoctorServiceItem(BaseModel):
+    name: str
+    price_from: Optional[float] = None
+
+
 class DoctorCreate(BaseModel):
     specialty: str
     bio: Optional[str] = None
@@ -41,6 +46,8 @@ class DoctorCreate(BaseModel):
     medical_aids: List[str] = []
     languages: List[str] = ["English"]
     working_hours: List[WorkingHoursInput] = []
+    services: List[DoctorServiceItem] = []
+    custom_services_note: Optional[str] = None
 
 
 class DoctorResponse(BaseModel):
@@ -67,6 +74,8 @@ class DoctorResponse(BaseModel):
     created_at: datetime
     practice_images: Optional[List[str]] = []
     working_hours: List[WorkingHoursOut] = []
+    services: List[DoctorServiceItem] = []
+    custom_services_note: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Boolean, DateTime, Integer, Float, ForeignKey, ARRAY
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import uuid
@@ -34,14 +34,21 @@ class Doctor(Base):
     rating = Column(Float, default=0.0)
     total_reviews = Column(Integer, default=0)
 
-    # Medical aids accepted — stored as array of strings
+    # Medical aids accepted - stored as array of strings
     medical_aids = Column(ARRAY(String), default=[])
 
     # Languages spoken
     languages = Column(ARRAY(String), default=["English"])
 
-    # Practice images — Cloudinary URLs
+    # Practice images - Cloudinary URLs
     practice_images = Column(ARRAY(String), default=[], nullable=True)
+
+    # Additional services beyond consultations - list of {name, price_from}.
+    # Curated on the frontend; anything outside that curated list comes
+    # through custom_services_note for manual review before ever being
+    # added here, rather than going live unvetted.
+    services = Column(JSONB, default=list, nullable=True)
+    custom_services_note = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

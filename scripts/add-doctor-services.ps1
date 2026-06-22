@@ -1,3 +1,178 @@
+Write-Host "Phila Backend - Add services to Doctor model, fix lat/lng override bug" -ForegroundColor Cyan
+
+New-Item -ItemType Directory -Force -Path "app/models" | Out-Null
+New-Item -ItemType Directory -Force -Path "app/schemas" | Out-Null
+New-Item -ItemType Directory -Force -Path "app/api/routes" | Out-Null
+
+# -- doctor.py model - add services + custom_services_note -------------------------
+Set-Content "app/models/doctor.py" @'
+from sqlalchemy import Column, String, Boolean, DateTime, Integer, Float, ForeignKey, ARRAY
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+import uuid
+
+from app.db.database import Base
+
+class Doctor(Base):
+    __tablename__ = "doctors"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, unique=True)
+
+    # Professional info
+    specialty = Column(String, nullable=False)
+    bio = Column(String, nullable=True)
+    years_experience = Column(Integer, default=0)
+    qualification = Column(String, nullable=True)
+
+    # Location
+    practice_name = Column(String, nullable=False)
+    address = Column(String, nullable=False)
+    city = Column(String, nullable=False)
+    province = Column(String, nullable=False)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+
+    # Settings
+    consultation_fee = Column(Float, nullable=False, default=0.0)
+    slot_duration_minutes = Column(Integer, default=20)
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
+    rating = Column(Float, default=0.0)
+    total_reviews = Column(Integer, default=0)
+
+    # Medical aids accepted - stored as array of strings
+    medical_aids = Column(ARRAY(String), default=[])
+
+    # Languages spoken
+    languages = Column(ARRAY(String), default=["English"])
+
+    # Practice images - Cloudinary URLs
+    practice_images = Column(ARRAY(String), default=[], nullable=True)
+
+    # Additional services beyond consultations - list of {name, price_from}.
+    # Curated on the frontend; anything outside that curated list comes
+    # through custom_services_note for manual review before ever being
+    # added here, rather than going live unvetted.
+    services = Column(JSONB, default=list, nullable=True)
+    custom_services_note = Column(String, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relationships
+    user = relationship("User", backref="doctor_profile")
+    slots = relationship("Slot", back_populates="doctor", cascade="all, delete-orphan")
+    working_hours = relationship("WorkingHours", back_populates="doctor", lazy="select")
+'@
+Write-Host "  Updated app/models/doctor.py" -ForegroundColor Green
+
+# -- doctor.py schema - DoctorServiceItem, services on Create + Response -----------
+Set-Content "app/schemas/doctor.py" @'
+from pydantic import BaseModel, field_serializer
+from uuid import UUID
+from datetime import datetime, time
+from typing import Optional, List
+
+
+class WorkingHoursInput(BaseModel):
+    day_of_week: int
+    is_active: bool = True
+    start_time: str
+    end_time: str
+
+
+class WorkingHoursOut(BaseModel):
+    day_of_week: int
+    is_active: bool
+    start_time: time
+    end_time: time
+
+    @field_serializer('start_time', 'end_time')
+    def serialize_time(self, t: time) -> str:
+        return t.strftime('%H:%M:%S')
+
+    class Config:
+        from_attributes = True
+
+
+class DoctorServiceItem(BaseModel):
+    name: str
+    price_from: Optional[float] = None
+
+
+class DoctorCreate(BaseModel):
+    specialty: str
+    bio: Optional[str] = None
+    years_experience: int = 0
+    qualification: Optional[str] = None
+    practice_name: str
+    address: str
+    city: str
+    province: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    consultation_fee: float
+    slot_duration_minutes: int = 20
+    medical_aids: List[str] = []
+    languages: List[str] = ["English"]
+    working_hours: List[WorkingHoursInput] = []
+    services: List[DoctorServiceItem] = []
+    custom_services_note: Optional[str] = None
+
+
+class DoctorResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    specialty: str
+    bio: Optional[str] = None
+    years_experience: int
+    qualification: Optional[str] = None
+    practice_name: str
+    address: str
+    city: str
+    province: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    consultation_fee: float
+    slot_duration_minutes: int
+    medical_aids: List[str]
+    languages: List[str]
+    is_active: bool
+    is_verified: bool
+    rating: Optional[float] = 0.0
+    total_reviews: Optional[int] = 0
+    created_at: datetime
+    practice_images: Optional[List[str]] = []
+    working_hours: List[WorkingHoursOut] = []
+    services: List[DoctorServiceItem] = []
+    custom_services_note: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SlotResponse(BaseModel):
+    id: UUID
+    doctor_id: UUID
+    date: str
+    start_time: str
+    end_time: str
+    status: str
+    blocked_reason: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DoctorWithSlotsResponse(DoctorResponse):
+    slots: List[SlotResponse] = []
+'@
+Write-Host "  Updated app/schemas/doctor.py" -ForegroundColor Green
+
+# -- doctors.py route - use services/custom_services_note, fix lat/lng override ----
+Set-Content "app/api/routes/doctors.py" @'
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -293,3 +468,9 @@ async def remove_practice_image(
     db.refresh(doctor)
 
     return {"success": True, "practice_images": doctor.practice_images}
+'@
+Write-Host "  Updated app/api/routes/doctors.py" -ForegroundColor Green
+
+git add .
+git commit -m "Add services/custom_services_note to Doctor model and schema, fix lat-lng override bug in registration"
+Write-Host "Backend changes committed!" -ForegroundColor Green
