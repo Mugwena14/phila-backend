@@ -1,3 +1,48 @@
+Write-Host "Phila Backend - Favorites feature (model, schema, endpoints)" -ForegroundColor Cyan
+
+New-Item -ItemType Directory -Force -Path "app/models" | Out-Null
+New-Item -ItemType Directory -Force -Path "app/schemas" | Out-Null
+New-Item -ItemType Directory -Force -Path "app/api/routes" | Out-Null
+
+# -- favorite_doctor.py model --------------------------------------------------------
+Set-Content "app/models/favorite_doctor.py" @'
+from sqlalchemy import Column, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.sql import func
+import uuid
+
+from app.db.database import Base
+
+
+class FavoriteDoctor(Base):
+    __tablename__ = "favorite_doctors"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    doctor_id = Column(UUID(as_uuid=True), ForeignKey("doctors.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("patient_id", "doctor_id", name="uq_patient_doctor_favorite"),
+    )
+'@
+Write-Host "  Created app/models/favorite_doctor.py" -ForegroundColor Green
+
+# -- favorite.py schema --------------------------------------------------------------
+Set-Content "app/schemas/favorite.py" @'
+from pydantic import BaseModel
+from uuid import UUID
+from datetime import datetime
+
+
+class FavoriteToggleResponse(BaseModel):
+    favorited: bool
+    doctor_id: UUID
+'@
+Write-Host "  Created app/schemas/favorite.py" -ForegroundColor Green
+
+# -- doctors.py route - three new endpoints added ------------------------------------
+Set-Content "app/api/routes/doctors.py" @'
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -346,3 +391,9 @@ async def remove_practice_image(
     db.refresh(doctor)
 
     return {"success": True, "practice_images": doctor.practice_images}
+'@
+Write-Host "  Updated app/api/routes/doctors.py - GET /favorites/me, POST/DELETE /{doctor_id}/favorite added" -ForegroundColor Green
+
+git add .
+git commit -m "Add account-synced favorites - FavoriteDoctor join table, GET /doctors/favorites/me, POST/DELETE /doctors/{id}/favorite"
+Write-Host "Committed locally - run alembic next, see instructions below" -ForegroundColor Yellow
