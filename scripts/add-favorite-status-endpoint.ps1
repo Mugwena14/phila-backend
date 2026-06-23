@@ -1,3 +1,6 @@
+Write-Host "Phila Backend - favorite-status check endpoint" -ForegroundColor Cyan
+
+Set-Content "app/api/routes/doctors.py" @'
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -357,3 +360,9 @@ async def remove_practice_image(
     db.refresh(doctor)
 
     return {"success": True, "practice_images": doctor.practice_images}
+'@
+Write-Host "  Updated app/api/routes/doctors.py - GET /{doctor_id}/favorite-status added" -ForegroundColor Green
+
+git add .
+git commit -m "Add GET /doctors/{id}/favorite-status - lets the mobile heart icon know its initial state on load"
+Write-Host "Done and committed!" -ForegroundColor Green
