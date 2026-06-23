@@ -1,3 +1,6 @@
+Write-Host "Phila Backend - fill in the empty favorites migration with real DDL" -ForegroundColor Cyan
+
+Set-Content "alembic/versions/71116fd50a5f_add_favorite_doctors_table.py" @'
 """add favorite_doctors table
 
 Revision ID: 71116fd50a5f
@@ -34,3 +37,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Downgrade schema."""
     op.drop_table("favorite_doctors")
+'@
+Write-Host "  Updated migration - upgrade() now actually creates the table, downgrade() drops it, stray model definition removed" -ForegroundColor Green
+
+git add .
+git commit -m "Fix empty favorites migration - autogenerate produced pass/pass, fill in op.create_table with real DDL"
+Write-Host "Committed locally - do NOT push yet, prod needs the version row reset first" -ForegroundColor Yellow
