@@ -1,234 +1,201 @@
 """
-Document template service - extraction and substitution for .docx templates.
+Custom .docx template handling - placeholder extraction, validation, and
+filling. All the python-docx edge cases live here so the routes stay simple.
 
-Handles the messy reality of real-world Word documents:
-  - Smart quotes from Word autocorrect that silently break placeholder regex
-  - Placeholders split across multiple <w:r> runs (the python-docx classic gotcha)
-  - Placeholders in headers and footers, not just the body
-  - Validation feedback for empty or unreadable files
+Hardening covered:
+  - Smart-quote normalisation (Word autocorrect breaks `{{` and `}}` silently)
+  - Run-joining before regex/replace (placeholders edited mid-string in Word
+    get split across multiple <w:r> XML runs - extraction sees the placeholder
+    on para.text but per-run substitution misses it)
+  - Header and footer scanning (doctors put dates/addresses there)
+  - Validation - corrupt files, missing placeholders, etc surface as useful
+    errors instead of 500s
+
+If you change the placeholder regex here, also update placeholderWillAutofill
+in phila-web's DocumentsPage.tsx so the UI indicators stay in sync.
+Phase 4-ish task: collapse both into a single server-owned heuristic.
 """
-from typing import List, Dict, Tuple
 import re
 import logging
+from typing import Iterable
+from docx import Document as DocxDocument
+from docx.text.paragraph import Paragraph
 
 logger = logging.getLogger(__name__)
 
-# Matches {{placeholder_name}} - the standard syntax we ask doctors to use.
-# \w+ allows letters, digits, underscores. No spaces inside placeholders.
-PLACEHOLDER_PATTERN = re.compile(r"\{\{(\w+)\}\}")
+
+# Curly variants Word autocorrect produces, mapped to ASCII straight quotes.
+# We only normalise within text we're about to scan for placeholders - the rest
+# of the document is left alone so legitimate smart quotes in prose survive.
+SMART_QUOTE_MAP = {
+    "\u2018": "'",   # left single quote
+    "\u2019": "'",   # right single quote
+    "\u201C": '"',   # left double quote
+    "\u201D": '"',   # right double quote
+    "\u201A": "'",   # single low-9 quote
+    "\u201E": '"',   # double low-9 quote
+    # Curly braces - the actual blockers for placeholders
+    "\uFF5B": "{",   # fullwidth left brace
+    "\uFF5D": "}",   # fullwidth right brace
+}
+
+PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 
 
-def _normalise_smart_chars(text: str) -> str:
-    """
-    Word autocorrect helpfully replaces straight quotes and braces with curly
-    Unicode variants. The placeholder regex needs ASCII { and }, so any
-    Unicode variant of { } " ' must be flipped back to ASCII before matching.
+class TemplateError(Exception):
+    """Raised when a .docx can't be processed - corrupt file, unreadable, etc."""
+    pass
 
-    Idempotent: running this on already-normalised text yields the same output.
-    """
+
+def _normalise(text: str) -> str:
+    """Replace curly Unicode variants with ASCII so placeholder regex matches."""
     if not text:
         return text
-    replacements = {
-        # Curly single quotes -> straight
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201A": "'",
-        "\u201B": "'",
-        # Curly double quotes -> straight
-        "\u201C": '"',
-        "\u201D": '"',
-        "\u201E": '"',
-        "\u201F": '"',
-        # Fullwidth brace variants -> ASCII
-        "\uFF5B": "{",
-        "\uFF5D": "}",
-        # White-square braces (rare but seen)
-        "\u2774": "{",
-        "\u2775": "}",
-    }
-    for bad, good in replacements.items():
+    for bad, good in SMART_QUOTE_MAP.items():
         text = text.replace(bad, good)
     return text
 
 
-def _normalise_paragraph_runs(para) -> None:
+def _iter_paragraphs(doc) -> Iterable[Paragraph]:
     """
-    Apply smart-char normalisation in-place to every run in a paragraph.
-    Done at the run level so we don't lose formatting.
+    Yield every paragraph in the document - body, tables, headers, footers.
+    Doctors put practice address and date in headers; placeholders there need
+    to be both detected and substituted.
     """
-    for run in para.runs:
-        if run.text:
-            run.text = _normalise_smart_chars(run.text)
+    # Body
+    for p in doc.paragraphs:
+        yield p
 
-
-def _iter_all_paragraphs(doc):
-    """
-    Yield every paragraph in the document - body, tables, and all section
-    headers and footers. python-docx treats headers/footers as separate
-    section objects that are easy to miss.
-    """
-    # Body paragraphs
-    for para in doc.paragraphs:
-        yield para
-    # Table cells (which contain their own paragraphs)
+    # Tables in body
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for para in cell.paragraphs:
-                    yield para
-    # Section headers and footers
+                for p in cell.paragraphs:
+                    yield p
+
+    # Sections - headers and footers
     for section in doc.sections:
-        if section.header is not None:
-            for para in section.header.paragraphs:
-                yield para
-            # Tables inside headers
-            for table in section.header.tables:
+        for container in (section.header, section.footer,
+                          section.first_page_header, section.first_page_footer,
+                          section.even_page_header, section.even_page_footer):
+            if container is None:
+                continue
+            for p in container.paragraphs:
+                yield p
+            for table in container.tables:
                 for row in table.rows:
                     for cell in row.cells:
-                        for para in cell.paragraphs:
-                            yield para
-        if section.footer is not None:
-            for para in section.footer.paragraphs:
-                yield para
-            for table in section.footer.tables:
-                for row in table.rows:
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            yield para
+                        for p in cell.paragraphs:
+                            yield p
 
 
-def extract_placeholders(file_path: str) -> List[str]:
+def extract_placeholders(file_path: str) -> list[str]:
     """
-    Scan a .docx and return the ordered list of unique {{placeholder}} names.
-    Covers body, tables, headers, and footers.
-    """
-    from docx import Document as DocxDocument
+    Scan a .docx and return every unique {{placeholder}} key it contains.
 
+    Handles smart quotes, scans body + tables + headers + footers. Preserves
+    insertion order so the UI form matches the document order.
+
+    Raises TemplateError if the file can't be opened.
+    """
     try:
         doc = DocxDocument(file_path)
     except Exception as e:
-        logger.warning(f"Could not open .docx for extraction at {file_path}: {e}")
-        raise ValueError(f"Could not read .docx file: {e}")
+        raise TemplateError(f"Could not open .docx file (is it valid?): {e}") from e
 
-    seen: Dict[str, None] = {}  # ordered set
-    for para in _iter_all_paragraphs(doc):
-        # Use the full paragraph text (joined across runs) so split placeholders
-        # are still detected. We do not modify the document here.
-        text = _normalise_smart_chars(para.text)
-        for match in PLACEHOLDER_PATTERN.findall(text):
-            seen[match] = None
+    seen: dict[str, None] = {}
+    for p in _iter_paragraphs(doc):
+        text = _normalise(p.text)
+        for match in PLACEHOLDER_RE.findall(text):
+            seen.setdefault(match, None)
+
     return list(seen.keys())
 
 
-def _replace_in_paragraph(para, values: Dict[str, str]) -> None:
+def _replace_in_paragraph(para: Paragraph, values: dict) -> None:
     """
-    Replace {{placeholders}} in a single paragraph.
+    Replace {{placeholders}} in a paragraph WITHOUT losing formatting.
 
-    The hard part: python-docx splits text across runs. A placeholder typed
-    as {{patient_name}} and then mid-edited can end up with `{{patient` in one
-    run and `_name}}` in the next, so a per-run str.replace silently misses it.
+    The python-docx run-splitting problem: Word stores text as one or more
+    <w:r> runs per paragraph. A placeholder typed and later edited often gets
+    split across runs. Per-run replacement misses these because each run holds
+    only a fragment.
 
-    Approach: if any placeholder exists in the joined paragraph text but the
-    run-by-run replace alone wouldn't catch it, collapse all runs into the
-    first run and clear the others. This loses run-level formatting WITHIN the
-    placeholder substring, but preserves formatting of the rest of the paragraph
-    in practice because Word usually wraps the whole placeholder in one
-    formatting span.
+    The fix: rebuild the paragraph by joining all run text, doing the replace
+    on the joined string, then writing the result back to the first run and
+    emptying the rest. This loses the formatting variation between sub-runs
+    (e.g. if `{{patient_name}}` had one half bold and one half italic, the
+    output uses the first run's formatting throughout). That trade-off is
+    fine - mixed formatting inside a single placeholder is rare and looks
+    wrong anyway.
     """
     if not para.runs:
         return
 
-    # First, normalise smart chars in every run so the regex finds them.
-    _normalise_paragraph_runs(para)
+    full_text = "".join(run.text for run in para.runs)
+    full_text = _normalise(full_text)
 
-    # Try the simple per-run replace first - covers the easy case and keeps
-    # all formatting intact.
-    for run in para.runs:
-        if run.text and "{{" in run.text:
-            for key, val in values.items():
-                token = "{{" + key + "}}"
-                if token in run.text:
-                    run.text = run.text.replace(token, str(val))
+    if "{{" not in full_text:
+        return  # nothing to do
 
-    # Check if any placeholders are still present in the joined text.
-    # If yes, they were split across runs. Collapse and re-replace.
-    joined = "".join(run.text for run in para.runs)
-    if "{{" not in joined:
-        return
+    for key, val in values.items():
+        full_text = full_text.replace(f"{{{{{key}}}}}", str(val) if val is not None else "")
 
-    still_present = [k for k in values.keys() if ("{{" + k + "}}") in joined]
-    if not still_present:
-        return
-
-    # Substitute in the joined string, then put it all in the first run.
-    new_text = joined
-    for key in still_present:
-        new_text = new_text.replace("{{" + key + "}}", str(values[key]))
-
-    para.runs[0].text = new_text
+    # Write the result back into the first run; blank out the rest.
+    para.runs[0].text = full_text
     for run in para.runs[1:]:
         run.text = ""
 
 
-def fill_template(template_path: str, values: Dict[str, str], output_path: str) -> None:
+def fill_placeholders(template_path: str, values: dict, output_path: str) -> None:
     """
-    Open the template, substitute all {{placeholders}} with provided values,
-    save to output_path. Covers body, tables, headers, footers.
-    """
-    from docx import Document as DocxDocument
+    Open template_path, substitute {{placeholders}} with values, save to
+    output_path. Handles run-splitting, headers, footers, tables.
 
-    doc = DocxDocument(template_path)
-    for para in _iter_all_paragraphs(doc):
-        _replace_in_paragraph(para, values)
-    doc.save(output_path)
+    Raises TemplateError on failure.
+    """
+    try:
+        doc = DocxDocument(template_path)
+    except Exception as e:
+        raise TemplateError(f"Could not open template: {e}") from e
+
+    try:
+        for p in _iter_paragraphs(doc):
+            _replace_in_paragraph(p, values)
+        doc.save(output_path)
+    except Exception as e:
+        raise TemplateError(f"Could not fill template: {e}") from e
 
 
-def build_preview_values(placeholders: List[str]) -> Dict[str, str]:
-    """
-    Build a dummy values dict for previewing a template against sample data.
-    Pattern-matches placeholder names to plausible sample content; falls back
-    to "[placeholder_name]" so the doctor can clearly see which field is which
-    in the rendered output.
-    """
-    today_str = "12 March 2026"
-    values: Dict[str, str] = {}
-    for key in placeholders:
-        k = key.lower()
-        if "patient" in k and "name" in k:
-            values[key] = "Sipho Mthembu"
-        elif "doctor" in k:
-            values[key] = "Dr. Jane Smith"
-        elif "practice" in k:
-            values[key] = "Mthembu Family Practice"
-        elif "date" in k and "visit" in k:
-            values[key] = today_str
-        elif "date" in k:
-            values[key] = today_str
-        elif "diagnosis" in k or "concern" in k:
-            values[key] = "Upper respiratory tract infection"
-        elif "medication" in k:
-            values[key] = "Amoxicillin 500mg, Paracetamol 500mg"
-        elif "allerg" in k:
-            values[key] = "Penicillin"
-        elif "note" in k or "additional" in k:
-            values[key] = "Patient advised to rest and increase fluid intake."
-        elif "duration" in k:
-            values[key] = "3 days"
-        elif "severity" in k:
-            values[key] = "5/10"
-        elif "days_off" in k or ("days" in k and "off" in k):
-            values[key] = "3"
-        elif "qualification" in k:
-            values[key] = "MBChB (UCT)"
-        elif "hpcsa" in k:
-            values[key] = "PR1234567"
-        elif "urgency" in k:
-            values[key] = "Routine"
-        elif "referred" in k and "specialty" in k:
-            values[key] = "Cardiologist"
-        elif "history" in k:
-            values[key] = "Hypertension diagnosed 2024, well-controlled on Amlodipine."
-        else:
-            # Visible placeholder so the doctor can see which slot it is
-            values[key] = f"[{key}]"
-    return values
+# ── Sample data for the preview endpoint ──────────────────────────────────────
+
+# Phase 1's placeholderWillAutofill heuristic, mirrored. Used for both the
+# preview endpoint (so the doctor sees realistic-looking sample data in their
+# template before using it on a real patient) and Phase 4's future single
+# source of truth.
+def sample_value_for(key: str) -> str:
+    """Realistic-looking sample value to use when previewing a template."""
+    k = key.lower()
+    if "patient" in k and "name" in k:    return "Sipho Mthembu"
+    if "doctor" in k:                      return "Dr Jane Mthembu"
+    if "practice" in k:                    return "Mthembu Family Practice"
+    if "date" in k and "visit" in k:       return "14 March 2026"
+    if "date" in k:                        return "15 March 2026"
+    if "diagnosis" in k or "concern" in k: return "Upper respiratory tract infection"
+    if "medication" in k:                  return "Paracetamol 500mg, Amoxicillin 500mg"
+    if "allerg" in k:                      return "Penicillin"
+    if "note" in k or "additional" in k:   return "Patient to rest and increase fluid intake."
+    if "duration" in k:                    return "3 days"
+    if "severity" in k:                    return "5/10"
+    if "days_off" in k or "days off" in k: return "3"
+    if "hpcsa" in k:                       return "MP 123456"
+    if "qualification" in k:               return "MBChB (UCT)"
+    if "urgency" in k:                     return "Routine"
+    # Manual-entry placeholders - keep the placeholder text so the doctor can
+    # see at a glance which fields they'd need to fill in for real.
+    return f"[{key}]"
+
+
+def build_sample_values(placeholders: list[str]) -> dict:
+    """Return a dict mapping every placeholder to a realistic sample value."""
+    return {p: sample_value_for(p) for p in placeholders}
