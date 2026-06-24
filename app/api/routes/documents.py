@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse, Response as FastAPIResponse
 from sqlalchemy.orm import Session
 from uuid import UUID
 from pydantic import BaseModel
+from datetime import datetime, timezone
 import json
 import uuid
 import os
@@ -12,6 +13,7 @@ import logging
 from app.db.database import get_db
 from app.models.patient_document import PatientDocument
 from app.models.document_template import DocumentTemplate
+from app.models.document_send_log import DocumentSendLog
 from app.models.user import User
 from app.models.doctor import Doctor
 from app.models.booking import Booking
@@ -25,6 +27,12 @@ from app.services.document_templates import (
     build_sample_values,
     TemplateError,
 )
+from app.services.media_tokens import issue_token, validate_token
+from app.services.document_pdf import (
+    render_builtin_pdf,
+    render_template_pdf,
+)
+from app.services.whatsapp import send_whatsapp_with_media
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 security = HTTPBearer()
@@ -32,6 +40,20 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = "uploads/templates"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Base URL Twilio uses to fetch document media. Set via env var on Railway;
+# falls back to the known prod URL so the demo can run before the var is set.
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL",
+    "https://phila-backend-production.up.railway.app",
+).rstrip("/")
+
+DOC_TYPE_LABELS = {
+    "sick_letter":         "sick note",
+    "medical_certificate": "medical certificate",
+    "referral_letter":     "referral letter",
+    "visit_summary":       "visit summary",
+}
 
 
 def get_current_user(
@@ -55,6 +77,21 @@ def _get_doctor(db: Session, current_user: User) -> Doctor:
     return doctor
 
 
+def _serialize_doc(d: PatientDocument) -> dict:
+    """Common serialization used by every doc endpoint."""
+    return {
+        "id": str(d.id),
+        "patient_id": str(d.patient_id),
+        "booking_id": str(d.booking_id) if d.booking_id else None,
+        "doc_type": d.doc_type,
+        "content": json.loads(d.content),
+        "created_at": str(d.created_at),
+        "sent_via_whatsapp_at": d.sent_via_whatsapp_at.isoformat() if d.sent_via_whatsapp_at else None,
+        "sent_via_email_at": d.sent_via_email_at.isoformat() if d.sent_via_email_at else None,
+        "recalled_at": d.recalled_at.isoformat() if d.recalled_at else None,
+    }
+
+
 # ── TEMPLATE ENDPOINTS ────────────────────────────────────────────────────────
 
 @router.post("/templates/upload", status_code=201)
@@ -65,24 +102,16 @@ async def upload_template(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Upload a .docx template. Extracts {{placeholders}} from body, tables,
-    headers, and footers. Smart-quote tolerant.
-    """
     doctor = _get_doctor(db, current_user)
-
     if not file.filename or not file.filename.endswith(".docx"):
         raise HTTPException(status_code=400, detail="Only .docx files are supported")
 
     template_id = str(uuid.uuid4())
     safe_filename = f"{template_id}_{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
-
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # Extract placeholders. Bad files get cleaned up immediately so we don't
-    # accumulate junk on disk.
     try:
         placeholders = extract_placeholders(file_path)
     except TemplateError as e:
@@ -91,13 +120,7 @@ async def upload_template(
         raise HTTPException(status_code=400, detail=str(e))
 
     if not placeholders:
-        # Not fatal - we'll still save the template, but the doctor needs to
-        # know this isn't going to pre-fill anything. The UI in Phase 1 already
-        # surfaces the count from the response, so a clear 0 here is correct.
-        logger.warning(
-            "Template '%s' uploaded by doctor %s contains 0 placeholders",
-            name, doctor.id,
-        )
+        logger.warning("Template '%s' uploaded by doctor %s contains 0 placeholders", name, doctor.id)
 
     template = DocumentTemplate(
         id=uuid.UUID(template_id),
@@ -112,8 +135,6 @@ async def upload_template(
     db.commit()
     db.refresh(template)
 
-    logger.info("Template uploaded: %s - %d placeholders", name, len(placeholders))
-
     return {
         "id": str(template.id),
         "name": template.name,
@@ -125,10 +146,7 @@ async def upload_template(
 
 
 @router.get("/templates")
-def list_templates(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def list_templates(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     doctor = _get_doctor(db, current_user)
     templates = (
         db.query(DocumentTemplate)
@@ -150,11 +168,7 @@ def list_templates(
 
 
 @router.delete("/templates/{template_id}", status_code=200)
-def delete_template(
-    template_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def delete_template(template_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     doctor = _get_doctor(db, current_user)
     template = (
         db.query(DocumentTemplate)
@@ -163,27 +177,15 @@ def delete_template(
     )
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-
     if template.file_path and os.path.exists(template.file_path):
         os.remove(template.file_path)
-
     db.delete(template)
     db.commit()
     return {"message": "Template deleted"}
 
 
 @router.post("/templates/{template_id}/preview")
-def preview_template(
-    template_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Generate a .docx filled with sample data for this template. Lets the
-    doctor verify formatting and substitution before using it on a real
-    patient - catches run-splitting issues, missing placeholders, broken
-    templates BEFORE a consultation depends on it.
-    """
+def preview_template(template_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     doctor = _get_doctor(db, current_user)
     template = (
         db.query(DocumentTemplate)
@@ -195,7 +197,6 @@ def preview_template(
 
     placeholders = json.loads(template.placeholders)
     sample_values = build_sample_values(placeholders)
-
     preview_filename = f"preview_{uuid.uuid4()}.docx"
     preview_path = os.path.join(UPLOAD_DIR, preview_filename)
 
@@ -219,7 +220,6 @@ def generate_from_template(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fill a template with provided values and return the generated .docx."""
     doctor = _get_doctor(db, current_user)
     template = (
         db.query(DocumentTemplate)
@@ -265,7 +265,7 @@ def generate_from_template(
     )
 
 
-# ── BUILT-IN DOCUMENT ENDPOINTS (unchanged) ───────────────────────────────────
+# ── BUILT-IN DOC ENDPOINTS ────────────────────────────────────────────────────
 
 class GenerateDocumentRequest(BaseModel):
     booking_id: UUID
@@ -274,11 +274,7 @@ class GenerateDocumentRequest(BaseModel):
 
 
 @router.post("/generate", status_code=201)
-def generate_document(
-    data: GenerateDocumentRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def generate_document(data: GenerateDocumentRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     doctor = _get_doctor(db, current_user)
     booking = db.query(Booking).filter(Booking.id == data.booking_id).first()
     if not booking:
@@ -298,75 +294,165 @@ def generate_document(
     db.refresh(doc)
 
     return {
-        "id": str(doc.id),
-        "doc_type": doc.doc_type,
-        "content": json.loads(doc.content),
-        "created_at": str(doc.created_at),
+        **_serialize_doc(doc),
         "message": "Document generated successfully",
     }
 
 
 @router.get("/patient/{patient_id}")
-def get_patient_documents(
-    patient_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def get_patient_documents(patient_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     docs = (
         db.query(PatientDocument)
         .filter(PatientDocument.patient_id == patient_id)
         .order_by(PatientDocument.created_at.desc())
         .all()
     )
-    return [
-        {
-            "id": str(d.id),
-            "patient_id": str(d.patient_id),
-            "booking_id": str(d.booking_id) if d.booking_id else None,
-            "doc_type": d.doc_type,
-            "content": json.loads(d.content),
-            "created_at": str(d.created_at),
-        }
-        for d in docs
-    ]
+    return [_serialize_doc(d) for d in docs]
 
 
-@router.get("/{doc_id}")
-def get_document(
+# ── SEND ENDPOINT - the Phase 3a core ─────────────────────────────────────────
+
+class SendDocumentRequest(BaseModel):
+    channel: str  # 'whatsapp' | 'email' (email is Phase 3b)
+
+
+@router.post("/{doc_id}/send")
+def send_document(
     doc_id: UUID,
+    data: SendDocumentRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """
+    Send a generated document to the patient via the specified channel.
+    Issues a 15-minute signed media URL, calls Twilio, logs the outcome.
+    """
+    if data.channel not in ("whatsapp", "email"):
+        raise HTTPException(status_code=400, detail="Channel must be 'whatsapp' or 'email'")
+    if data.channel == "email":
+        raise HTTPException(status_code=501, detail="Email send is coming in Phase 3b")
+
     doc = db.query(PatientDocument).filter(PatientDocument.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Authorisation - only the doctor who owns this doc can send it
+    doctor = _get_doctor(db, current_user)
+    if doc.doctor_id != doctor.id:
+        raise HTTPException(status_code=403, detail="Not your document")
+
+    patient = db.query(User).filter(User.id == doc.patient_id).first()
+    if not patient or not patient.phone:
+        raise HTTPException(status_code=400, detail="Patient phone number not available")
+
+    # Issue signed URL Twilio can fetch
+    token = issue_token(str(doc.id))
+    media_url = f"{PUBLIC_BASE_URL}/api/v1/documents/{doc.id}/media/{token}"
+
+    # Build the message body
+    doc_label = DOC_TYPE_LABELS.get(doc.doc_type, "document")
+    if doc.doc_type.startswith("template_"):
+        try:
+            content = json.loads(doc.content)
+            doc_label = content.get("_template_name", "document")
+        except Exception:
+            pass
+    practice_name = doctor.practice_name or "your doctor"
+    body = f"Hi, your {doc_label} from {practice_name} is ready. View attached."
+
+    # Send
+    success, error = send_whatsapp_with_media(patient.phone, body, media_url)
+
+    # Audit log - always written, success or fail
+    log_entry = DocumentSendLog(
+        id=uuid.uuid4(),
+        document_id=doc.id,
+        channel=data.channel,
+        recipient=patient.phone,
+        success=success,
+        error_message=error,
+        initiated_by=current_user.id,
+    )
+    db.add(log_entry)
+
+    if success:
+        doc.sent_via_whatsapp_at = datetime.now(timezone.utc)
+
+    db.commit()
+
+    if not success:
+        raise HTTPException(status_code=502, detail=f"Send failed: {error}")
+
     return {
-        "id": str(doc.id),
-        "doc_type": doc.doc_type,
-        "content": json.loads(doc.content),
-        "created_at": str(doc.created_at),
+        "success": True,
+        "channel": data.channel,
+        "sent_at": doc.sent_via_whatsapp_at.isoformat(),
     }
 
 
+# ── MEDIA ENDPOINT - public, token-gated ──────────────────────────────────────
+
+@router.get("/{doc_id}/media/{token}")
+def get_document_media(doc_id: UUID, token: str, db: Session = Depends(get_db)):
+    """
+    Public endpoint - Twilio fetches the PDF here, server-to-server, using the
+    signed token issued by /send. No auth header; the URL token IS the auth.
+    Tokens expire after 15 minutes.
+    """
+    bound_doc_id = validate_token(token)
+    if not bound_doc_id or bound_doc_id != str(doc_id):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    doc = db.query(PatientDocument).filter(PatientDocument.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    content = json.loads(doc.content)
+
+    # Resolve doctor name and practice for the letterhead
+    doctor = db.query(Doctor).filter(Doctor.id == doc.doctor_id).first()
+    practice_name = doctor.practice_name if doctor else ""
+    doctor_name = ""
+    if doctor:
+        doctor_user = db.query(User).filter(User.id == doctor.user_id).first()
+        if doctor_user and doctor_user.full_name:
+            doctor_name = f"Dr. {doctor_user.full_name}"
+
+    if doc.doc_type.startswith("template_") and "_output_file" in content:
+        file_bytes, mime_type, ext = render_template_pdf(content["_output_file"])
+    else:
+        file_bytes, mime_type, ext = render_builtin_pdf(doc.doc_type, content, doctor_name, practice_name)
+
+    filename = f"{doc.doc_type}_{str(doc.id)[:8]}.{ext}"
+    return FastAPIResponse(
+        content=file_bytes,
+        media_type=mime_type,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+# ── GET BY ID - kept last so /{doc_id}/send and /{doc_id}/media/{tk} match first ─
+
+@router.get("/{doc_id}")
+def get_document(doc_id: UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    doc = db.query(PatientDocument).filter(PatientDocument.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return _serialize_doc(doc)
+
+
 @router.get("/templates/starter/{doc_type}")
-def download_starter_template(
-    doc_type: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Download a pre-built starter .docx for a given doc type."""
+def download_starter_template(doc_type: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     valid_types = ["sick_letter", "medical_certificate", "referral_letter", "visit_summary"]
     if doc_type not in valid_types:
         raise HTTPException(status_code=400, detail="Invalid doc type")
 
     doctor = db.query(Doctor).filter(Doctor.user_id == current_user.id).first()
     practice_name = doctor.practice_name if doctor else "Your Practice Name"
-
     user = db.query(User).filter(User.id == current_user.id).first()
     doctor_name = f"Dr. {user.full_name}" if user else "Dr. Your Name"
 
     docx_bytes = create_starter_template(doc_type, practice_name, doctor_name)
-
     filename_map = {
         "sick_letter": "Sick_Letter_Starter.docx",
         "medical_certificate": "Medical_Certificate_Starter.docx",
