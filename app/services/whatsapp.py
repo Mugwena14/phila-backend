@@ -40,16 +40,10 @@ def send_whatsapp_message(to_phone: str, message: str) -> bool:
 
 def send_whatsapp_with_media(to_phone: str, body: str, media_url: str) -> tuple[bool, str | None]:
     """
-    Send a WhatsApp message with a media attachment (PDF, DOCX, etc.).
-    Twilio fetches media_url server-to-server, so it must be publicly reachable.
+    Send a WhatsApp message with a media attachment. Twilio fetches media_url
+    server-to-server, so it must be publicly reachable.
 
-    Returns (success, error_message). On success, error_message is None.
-    On failure, error_message is the exception text - logged to
-    document_send_log for the audit trail.
-
-    SANDBOX NOTE: in sandbox mode, the recipient must have first joined the
-    sandbox by texting the join code to the sandbox number. In prod with an
-    approved sender, this restriction goes away.
+    Returns (success, error_message).
     """
     try:
         to_formatted = format_whatsapp_number(to_phone)
@@ -60,6 +54,35 @@ def send_whatsapp_with_media(to_phone: str, body: str, media_url: str) -> tuple[
             media_url=[media_url],
         )
         logger.info(f"WhatsApp media sent to {to_formatted} - SID: {msg.sid} - URL: {media_url[:80]}")
+        return True, None
+    except TwilioException as e:
+        err = f"Twilio error: {e}"
+        logger.error(f"{err} (to {to_phone})")
+        return False, err
+    except Exception as e:
+        err = f"Unexpected error: {e}"
+        logger.error(f"{err} (to {to_phone})")
+        return False, err
+
+
+def send_recall_message(to_phone: str, doc_label: str, practice_name: str) -> tuple[bool, str | None]:
+    """
+    Send a text WhatsApp telling the patient to disregard a previously-sent doc.
+    Used when a doctor realises a sent doc was wrong.
+    Returns (success, error_message).
+    """
+    body = (
+        f"Hi, please disregard the previous {doc_label} from {practice_name}. "
+        f"It contained an error. A corrected version will follow shortly if applicable."
+    )
+    try:
+        to_formatted = format_whatsapp_number(to_phone)
+        msg = client.messages.create(
+            from_=settings.TWILIO_WHATSAPP_FROM,
+            to=to_formatted,
+            body=body,
+        )
+        logger.info(f"Recall message sent to {to_formatted} - SID: {msg.sid}")
         return True, None
     except TwilioException as e:
         err = f"Twilio error: {e}"

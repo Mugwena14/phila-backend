@@ -1,3 +1,216 @@
+Write-Host "Phila Backend - Phase 3b - recall, email via Brevo, doc list send" -ForegroundColor Cyan
+
+# 1. requirements - add the Brevo SDK
+$req = Get-Content requirements.txt -Raw
+if ($req -notmatch "sib-api-v3-sdk") {
+    Add-Content requirements.txt "`nsib-api-v3-sdk>=7.6.0"
+    Write-Host "  Added sib-api-v3-sdk to requirements.txt (Brevo Python SDK)" -ForegroundColor Green
+}
+
+# 2. New service - Brevo transactional email
+Set-Content "app/services/email_brevo.py" @'
+"""
+Brevo (formerly Sendinblue) transactional email integration.
+
+Used for document send via email channel. Free tier covers 300 emails/day -
+plenty for the pilot. At scale (>9k emails/month) we move to a paid Brevo
+tier or switch to AWS SES.
+
+Env vars required at runtime:
+  BREVO_API_KEY        - generated in Brevo dashboard, starts with xkeysib-
+  BREVO_SENDER_EMAIL   - verified sender address (single email for demo,
+                         verified domain for prod)
+  BREVO_SENDER_NAME    - optional, displayed as the from name (default: Phila Health)
+
+If BREVO_API_KEY is missing at send time, send_email_with_attachment returns
+(False, useful_error) rather than crashing. The doctor sees a clear error,
+not a 500.
+"""
+import os
+import base64
+import logging
+from typing import Tuple
+
+logger = logging.getLogger(__name__)
+
+
+def send_email_with_attachment(
+    to_email: str,
+    to_name: str,
+    subject: str,
+    body_html: str,
+    body_text: str,
+    attachment_bytes: bytes,
+    attachment_filename: str,
+) -> Tuple[bool, str | None]:
+    """
+    Send a transactional email via Brevo with one attachment.
+    Returns (success, error_message). On success, error_message is None.
+    On failure, error_message is the exception text - logged to
+    document_send_log for the audit trail.
+    """
+    api_key = os.environ.get("BREVO_API_KEY")
+    if not api_key:
+        return False, "BREVO_API_KEY not set on the server"
+
+    sender_email = os.environ.get("BREVO_SENDER_EMAIL")
+    if not sender_email:
+        return False, "BREVO_SENDER_EMAIL not set on the server"
+
+    sender_name = os.environ.get("BREVO_SENDER_NAME", "Phila Health")
+
+    try:
+        import sib_api_v3_sdk
+        from sib_api_v3_sdk.rest import ApiException
+    except ImportError:
+        return False, "sib-api-v3-sdk not installed (did you pip install requirements.txt?)"
+
+    configuration = sib_api_v3_sdk.Configuration()
+    configuration.api_key["api-key"] = api_key
+    api = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
+
+    encoded_attachment = base64.b64encode(attachment_bytes).decode("utf-8")
+
+    email = sib_api_v3_sdk.SendSmtpEmail(
+        sender={"name": sender_name, "email": sender_email},
+        to=[{"email": to_email, "name": to_name or to_email}],
+        subject=subject,
+        html_content=body_html,
+        text_content=body_text,
+        attachment=[{
+            "name": attachment_filename,
+            "content": encoded_attachment,
+        }],
+    )
+
+    try:
+        result = api.send_transac_email(email)
+        logger.info(f"Brevo email sent to {to_email} - messageId: {result.message_id}")
+        return True, None
+    except ApiException as e:
+        err = f"Brevo API error: {e.status} {e.reason}"
+        logger.error(f"{err} (to {to_email})")
+        return False, err
+    except Exception as e:
+        err = f"Unexpected error sending email: {e}"
+        logger.error(f"{err} (to {to_email})")
+        return False, err
+'@
+Write-Host "  Created app/services/email_brevo.py" -ForegroundColor Green
+
+# 3. Extend whatsapp service with recall message
+Set-Content "app/services/whatsapp.py" @'
+from twilio.rest import Client
+from twilio.base.exceptions import TwilioException
+from app.core.config import settings
+import logging
+
+logger = logging.getLogger(__name__)
+
+client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+
+
+def format_whatsapp_number(phone: str) -> str:
+    cleaned = phone.replace(" ", "").replace("-", "")
+    if cleaned.startswith("0"):
+        cleaned = "+27" + cleaned[1:]
+    elif cleaned.startswith("27") and not cleaned.startswith("+"):
+        cleaned = "+" + cleaned
+    elif not cleaned.startswith("+"):
+        cleaned = "+" + cleaned
+    return f"whatsapp:{cleaned}"
+
+
+def send_whatsapp_message(to_phone: str, message: str) -> bool:
+    """Send a text-only WhatsApp message. Returns True on success."""
+    try:
+        to_formatted = format_whatsapp_number(to_phone)
+        msg = client.messages.create(
+            from_=settings.TWILIO_WHATSAPP_FROM,
+            to=to_formatted,
+            body=message,
+        )
+        logger.info(f"WhatsApp sent to {to_formatted} - SID: {msg.sid}")
+        return True
+    except TwilioException as e:
+        logger.error(f"Twilio error sending to {to_phone}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error sending WhatsApp to {to_phone}: {e}")
+        return False
+
+
+def send_whatsapp_with_media(to_phone: str, body: str, media_url: str) -> tuple[bool, str | None]:
+    """
+    Send a WhatsApp message with a media attachment. Twilio fetches media_url
+    server-to-server, so it must be publicly reachable.
+
+    Returns (success, error_message).
+    """
+    try:
+        to_formatted = format_whatsapp_number(to_phone)
+        msg = client.messages.create(
+            from_=settings.TWILIO_WHATSAPP_FROM,
+            to=to_formatted,
+            body=body,
+            media_url=[media_url],
+        )
+        logger.info(f"WhatsApp media sent to {to_formatted} - SID: {msg.sid} - URL: {media_url[:80]}")
+        return True, None
+    except TwilioException as e:
+        err = f"Twilio error: {e}"
+        logger.error(f"{err} (to {to_phone})")
+        return False, err
+    except Exception as e:
+        err = f"Unexpected error: {e}"
+        logger.error(f"{err} (to {to_phone})")
+        return False, err
+
+
+def send_recall_message(to_phone: str, doc_label: str, practice_name: str) -> tuple[bool, str | None]:
+    """
+    Send a text WhatsApp telling the patient to disregard a previously-sent doc.
+    Used when a doctor realises a sent doc was wrong.
+    Returns (success, error_message).
+    """
+    body = (
+        f"Hi, please disregard the previous {doc_label} from {practice_name}. "
+        f"It contained an error. A corrected version will follow shortly if applicable."
+    )
+    try:
+        to_formatted = format_whatsapp_number(to_phone)
+        msg = client.messages.create(
+            from_=settings.TWILIO_WHATSAPP_FROM,
+            to=to_formatted,
+            body=body,
+        )
+        logger.info(f"Recall message sent to {to_formatted} - SID: {msg.sid}")
+        return True, None
+    except TwilioException as e:
+        err = f"Twilio error: {e}"
+        logger.error(f"{err} (to {to_phone})")
+        return False, err
+    except Exception as e:
+        err = f"Unexpected error: {e}"
+        logger.error(f"{err} (to {to_phone})")
+        return False, err
+
+
+def parse_incoming_message(form_data: dict) -> dict:
+    raw_from = form_data.get("From", "").replace("whatsapp:", "").strip()
+    return {
+        "from_number": raw_from,
+        "to_number": form_data.get("To", "").replace("whatsapp:", ""),
+        "body": form_data.get("Body", "").strip(),
+        "message_sid": form_data.get("MessageSid", ""),
+        "account_sid": form_data.get("AccountSid", ""),
+        "num_media": int(form_data.get("NumMedia", 0)),
+    }
+'@
+Write-Host "  Updated app/services/whatsapp.py with send_recall_message" -ForegroundColor Green
+
+# 4. Extend the documents route - email channel, recall endpoint
+Set-Content "app/api/routes/documents.py" @'
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, Response as FastAPIResponse
 from sqlalchemy.orm import Session
@@ -597,3 +810,9 @@ def download_starter_template(doc_type: str, db: Session = Depends(get_db), curr
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{filename_map[doc_type]}"'},
     )
+'@
+Write-Host "  Updated app/api/routes/documents.py - email channel, recall endpoint, authenticated download, X-Document-Id header on template generate" -ForegroundColor Green
+
+git add .
+git commit -m "Phase 3b - email send via Brevo, recall endpoint, authenticated download. POST /documents/{id}/send now accepts channel=email - renders bytes inline and attaches to a Brevo transactional email. New POST /documents/{id}/recall stamps recalled_at and sends a WhatsApp disregard message if the doc went via WhatsApp (email recall is doctor-manual deliberately). New GET /documents/{id}/download authenticated route returns the rendered file as attachment for the doctor to download. Template generate endpoint now returns X-Document-Id response header so frontend can wire Send buttons against template-generated docs. New app/services/email_brevo.py - lazy-loaded SDK, graceful failure when BREVO_API_KEY isnt configured."
+Write-Host "Phase 3b backend committed locally. No migration needed - schema unchanged from 3a." -ForegroundColor Yellow
