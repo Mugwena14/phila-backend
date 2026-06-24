@@ -1,3 +1,6 @@
+Write-Host "Phila Backend - make Alembic loud about what it actually does, remove Procfile duplicate" -ForegroundColor Cyan
+
+Set-Content "alembic/env.py" @'
 import os
 import sys
 from logging.config import fileConfig
@@ -92,3 +95,16 @@ if context.is_offline_mode():
         context.run_migrations()
 else:
     run_migrations_online()
+'@
+Write-Host "  Updated alembic/env.py - now logs host, before/after revision, and whether anything was applied" -ForegroundColor Green
+
+if (Test-Path "Procfile") {
+    Remove-Item "Procfile"
+    Write-Host "  Removed Procfile - railway.toml is now the sole source of truth for the start command" -ForegroundColor Green
+} else {
+    Write-Host "  Procfile not found - already removed or never existed" -ForegroundColor Yellow
+}
+
+git add .
+git commit -m "Phase 0 - make Alembic migrations loud on deploy, remove Procfile duplicate. env.py now logs DB host, revision before, revision after, and whether anything was applied. Procfile deleted so railway.toml is single source of truth for startCommand"
+Write-Host "Committed locally. Push to deploy and watch the next deploy log carefully" -ForegroundColor Yellow
