@@ -17,3 +17,6 @@ venv/
 
 # OS
 .DS_Store
+# Local-only backups created by migration scripts
+.env.local-backup
+.env.*.backup
