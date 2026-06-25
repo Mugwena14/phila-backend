@@ -1,7 +1,17 @@
-# WeasyPrint requires Pango, Cairo, and related rendering libraries at runtime.
-# nixpacks default Python image doesn't include these. Adding via aptPkgs makes
-# PDF rendering on Railway match what the local fallback would produce on a
-# Linux dev box. If Pango is missing, the PDF service falls back to attaching
-# raw .docx files - which still works on WhatsApp, just not as nice.
+# WeasyPrint runtime dependencies for Railways Debian-based nixpacks image.
+#
+# libgobject + libglib are required by Pango at runtime. Apt usually pulls
+# these in transitively, but Railways nixpacks image leaves them out, which
+# triggers WeasyPrints fallback path (HTML / .docx instead of PDF) without
+# any clear error. Listing them explicitly fixes that silent degradation.
 [phases.setup]
-aptPkgs = ["libpango-1.0-0", "libpangoft2-1.0-0", "libcairo2", "libffi-dev"]
+aptPkgs = [
+  "libpango-1.0-0",
+  "libpangoft2-1.0-0",
+  "libcairo2",
+  "libffi-dev",
+  "libgobject-2.0-0",
+  "libglib2.0-0",
+  "libgdk-pixbuf-2.0-0",
+  "shared-mime-info",
+]
