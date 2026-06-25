@@ -251,7 +251,7 @@ def create_walk_in_booking(
     ))
     db.commit()
 
-    response = return BookingDetailResponse(
+    response = BookingDetailResponse(
         id=booking.id,
         patient_id=booking.patient_id,
         doctor_id=booking.doctor_id,
