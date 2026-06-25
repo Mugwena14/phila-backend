@@ -39,6 +39,10 @@ class BookingResponse(BaseModel):
         from_attributes = True
 
 class BookingDetailResponse(BookingResponse):
+    # Phase 4a - walk-in welcome WhatsApp delivery result, populated only on
+    # POST /bookings/walk-in. Null on all other booking-fetch endpoints.
+    walk_in_message_sent: Optional[bool] = None
+    walk_in_message_error: Optional[str] = None
     slot_date: Optional[str] = None
     slot_start_time: Optional[str] = None
     slot_end_time: Optional[str] = None

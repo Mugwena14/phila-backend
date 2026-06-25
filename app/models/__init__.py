@@ -1,12 +1,5 @@
 """
-Every SQLAlchemy model must be imported here.
-
-Alembic's autogenerate compares Base.metadata against the database. Models
-that aren't imported into the metadata at generation time are invisible -
-autogenerate produces an empty upgrade() with `pass`. This was the root
-cause of the favorites empty-migration on 23 June 2026.
-
-When you add a new model, add a line here. No exceptions.
+Every SQLAlchemy model must be imported here. See env.py for the reasoning.
 """
 from app.models.user import User
 from app.models.doctor import Doctor
@@ -24,3 +17,4 @@ from app.models.patient_profile import PatientProfile
 from app.models.document_template import DocumentTemplate
 from app.models.favorite_doctor import FavoriteDoctor
 from app.models.document_send_log import DocumentSendLog
+from app.models.booking_comms_log import BookingCommsLog

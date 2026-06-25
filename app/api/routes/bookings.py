@@ -219,7 +219,39 @@ def create_walk_in_booking(
         logger.warning(f"Walk-in notification failed (non-fatal): {e}")
     logger.info(f"Walk-in booking created: {booking.id} for {patient.full_name}")
 
-    return BookingDetailResponse(
+    # Phase 4a - send walk-in welcome WhatsApp to the patient's real phone.
+    # data.patient_phone is the un-prefixed real number; patient.phone is
+    # the WALKIN_+27... form. Send to the real number.
+    practice_name = doctor.practice_name or "your doctor"
+    appointment_date = slot.date if slot else None
+    appointment_time = slot.start_time if slot else None
+
+    msg_sent = False
+    msg_error: str | None = None
+    if appointment_date and appointment_time:
+        msg_sent, msg_error = send_walkin_welcome(
+            patient_phone=data.patient_phone,
+            patient_name=data.patient_name,
+            practice_name=practice_name,
+            appointment_date=appointment_date,
+            appointment_time=appointment_time,
+        )
+    else:
+        msg_error = "Slot has no date/time - cannot compose appointment message"
+
+    # Audit log entry, regardless of success or failure
+    db.add(BookingCommsLog(
+        booking_id=booking.id,
+        comms_type="walkin_welcome",
+        channel="whatsapp",
+        recipient=data.patient_phone,
+        success=msg_sent,
+        error_message=msg_error,
+        initiated_by=current_user.id,
+    ))
+    db.commit()
+
+    response = return BookingDetailResponse(
         id=booking.id,
         patient_id=booking.patient_id,
         doctor_id=booking.doctor_id,
@@ -230,7 +262,10 @@ def create_walk_in_booking(
         risk_score=booking.risk_score,
         is_walk_in=True,
         created_at=booking.created_at,
-        slot_date=str(slot.date) if slot else None,
+        slot_date=str(slot.date)
+    response.walk_in_message_sent = msg_sent
+    response.walk_in_message_error = msg_error
+    return response if slot else None,
         slot_start_time=str(slot.start_time) if slot else None,
         slot_end_time=str(slot.end_time) if slot else None,
         slot_duration_minutes=doctor.slot_duration_minutes,
