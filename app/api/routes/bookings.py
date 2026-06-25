@@ -251,7 +251,7 @@ def create_walk_in_booking(
     ))
     db.commit()
 
-    response = BookingDetailResponse(
+    return BookingDetailResponse(
         id=booking.id,
         patient_id=booking.patient_id,
         doctor_id=booking.doctor_id,
@@ -262,10 +262,7 @@ def create_walk_in_booking(
         risk_score=booking.risk_score,
         is_walk_in=True,
         created_at=booking.created_at,
-        slot_date=str(slot.date)
-    response.walk_in_message_sent = msg_sent
-    response.walk_in_message_error = msg_error
-    return response if slot else None,
+        slot_date=str(slot.date) if slot else None,
         slot_start_time=str(slot.start_time) if slot else None,
         slot_end_time=str(slot.end_time) if slot else None,
         slot_duration_minutes=doctor.slot_duration_minutes,
@@ -276,6 +273,8 @@ def create_walk_in_booking(
         address=doctor.address,
         city=doctor.city if doctor else None,
         province=doctor.province if doctor else None,
+        walk_in_message_sent=msg_sent,
+        walk_in_message_error=msg_error,
     )
 
 @router.patch("/{booking_id}/status", status_code=200)
