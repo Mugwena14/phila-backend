@@ -1,9 +1,4 @@
 # WeasyPrint runtime dependencies for Railways Debian-based nixpacks image.
-#
-# libgobject + libglib are required by Pango at runtime. Apt usually pulls
-# these in transitively, but Railways nixpacks image leaves them out, which
-# triggers WeasyPrints fallback path (HTML / .docx instead of PDF) without
-# any clear error. Listing them explicitly fixes that silent degradation.
 [phases.setup]
 aptPkgs = [
   "libpango-1.0-0",
