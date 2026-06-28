@@ -40,6 +40,11 @@ import random
 import string
 import json
 
+
+# Phase 4a - walk-in welcome comms
+from app.services.walkin_comms import send_walkin_welcome
+from app.models.booking_comms_log import BookingCommsLog
+
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 security = HTTPBearer()
 logger = logging.getLogger(__name__)
