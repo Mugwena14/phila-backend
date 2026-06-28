@@ -84,3 +84,51 @@ def send_email_with_attachment(
         err = f"Unexpected error sending email: {e}"
         logger.error(f"{err} (to {to_email})")
         return False, err
+
+
+def send_email(
+    to_email: str,
+    to_name: str,
+    subject: str,
+    text_content: str,
+    html_content: str | None = None,
+) -> tuple[bool, str | None]:
+    """
+    Simpler send for transactional emails without attachments (e.g. OTPs).
+    Mirrors send_email_with_attachment but skips the attachment plumbing.
+    Returns (success, error_message).
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if not BREVO_API_KEY:
+        return False, "Brevo not configured"
+
+    try:
+        import sib_api_v3_sdk
+        from sib_api_v3_sdk.rest import ApiException
+    except ImportError:
+        return False, "Brevo SDK not installed"
+
+    cfg = sib_api_v3_sdk.Configuration()
+    cfg.api_key["api-key"] = BREVO_API_KEY
+    api = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(cfg))
+
+    payload = sib_api_v3_sdk.SendSmtpEmail(
+        to=[{"email": to_email, "name": to_name or to_email}],
+        sender={"email": BREVO_SENDER_EMAIL, "name": BREVO_SENDER_NAME},
+        subject=subject,
+        text_content=text_content,
+        html_content=html_content,
+    )
+
+    try:
+        api.send_transac_email(payload)
+        logger.info(f"Brevo email sent to {to_email} - subject: {subject}")
+        return True, None
+    except ApiException as e:
+        logger.error(f"Brevo API error: {e.status} {e.reason} (to {to_email})")
+        return False, f"Brevo API error: {e.status} {e.reason}"
+    except Exception as e:
+        logger.error(f"Unexpected Brevo error: {e}")
+        return False, f"Unexpected error: {e}"

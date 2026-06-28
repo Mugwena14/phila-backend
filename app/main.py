@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.api.routes import auth, doctors, bookings, patients, webhooks, triage, slots, documents, copilot
+from app.api.routes import auth, doctors, bookings, patients, webhooks, triage, slots, documents, copilot, otp_auth
 from app.api.routes import waiting_room
 from app.api.routes import nearby
 from app.api.routes import notifications
@@ -24,6 +24,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(otp_auth.router, prefix="/api/v1")
 app.include_router(nearby.router, prefix="/api/v1", tags=["nearby"]) 
 app.include_router(doctors.router, prefix="/api/v1")
 app.include_router(bookings.router, prefix="/api/v1")
